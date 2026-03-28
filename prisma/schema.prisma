@@ -20,10 +20,11 @@ enum RaffleStatus {
   CANCELLED
 }
 
+// WAITING_PAYMENT removido.
 enum OrderStatus {
   PENDING
-  WAITING_PAYMENT
   PAID
+  FAILED
   EXPIRED
   CANCELLED
 }
@@ -57,14 +58,23 @@ model Raffle {
 }
 
 model Order {
-  id              String      @id @default(uuid())
-  userId          String
-  user            User        @relation(fields: [userId], references: [id])
-  raffleId        String
-  raffle          Raffle      @relation(fields: [raffleId], references: [id])
-  selectedTickets Int[]
-  totalAmount     Float
-  status          OrderStatus @default(PENDING)
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id                     String      @id @default(uuid())
+  userId                 String
+  user                   User        @relation(fields: [userId], references: [id])
+  raffleId               String
+  raffle                 Raffle      @relation(fields: [raffleId], references: [id])
+  
+  selectedTickets        Int[]
+  totalAmount            Float
+  status                 OrderStatus @default(PENDING)
+  
+  // Campos de Integração
+  provider               String      @default("INFINITEPAY")
+  orderNsu               String      @unique
+  providerTransactionNsu String?     
+  receiptUrl             String?     
+  paymentMethod          String?     @default("PIX")
+
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
 }
