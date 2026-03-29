@@ -1,7 +1,15 @@
-import { Controller, Post, Body, Headers, HttpCode, HttpStatus, Logger } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
-@Controller('webhooks/infinitepay')
+@Controller('webhooks/asaas')
 export class WebhooksController {
   private readonly logger = new Logger(WebhooksController.name);
 
@@ -9,59 +17,132 @@ export class WebhooksController {
 
   @Post()
   @HttpCode(HttpStatus.OK)
-  async handleInfinitePayWebhook(
+  async handleAsaasWebhook(
     @Body() payload: any,
-    @Headers('x-infinitepay-signature') signature: string
+    @Headers('asaas-access-token') webhookToken: string,
   ) {
-    this.logger.log(`Webhook InfinitePay recebido: ${JSON.stringify(payload)}`);
+    try {
+      const expectedToken = process.env.ASAAS_WEBHOOK_TOKEN;
 
-    // DICA DE SEGURANÇA: Em produção, você DEVE validar a "signature" do webhook 
-    // cruzando com o INFINITEPAY_WEBHOOK_SECRET para garantir que a origem é a InfinitePay.
+      if (expectedToken && webhookToken !== expectedToken) {
+        this.logger.warn(
+          `[ASAAS WEBHOOK] Token inválido recebido. Ignorando.`,
+        );
+        return { received: false, unauthorized: true };
+      }
 
-    const { order_nsu, status, transaction_nsu, receipt_url } = payload;
+      this.logger.log(`[ASAAS WEBHOOK] Payload recebido: ${JSON.stringify(payload)}`);
 
-    if (!order_nsu) {
-      return { received: true, ignored: true, reason: 'order_nsu_missing' };
-    }
+      const event = payload?.event;
+      const payment = payload?.payment;
 
-    // 1. Localizar o pedido pelo NSU único
-    const order = await this.prisma.order.findUnique({
-      where: { orderNsu: order_nsu }
-    });
+      if (!payment) {
+        return { received: true, ignored: true, reason: 'payment_missing' };
+      }
 
-    if (!order) {
-      this.logger.warn(`Pedido não encontrado para NSU: ${order_nsu}`);
-      return { received: true, ignored: true, reason: 'order_not_found' };
-    }
+      const orderNsu = payment?.externalReference;
 
-    // 2. Garantir a Idempotência (Evitar processamento duplicado)
-    if (order.status === 'PAID') {
-      this.logger.log(`Pedido ${order_nsu} já estava marcado como PAGO. Ignorando webhook duplicado.`);
-      return { received: true, status: 'already_paid' };
-    }
+      if (!orderNsu) {
+        return { received: true, ignored: true, reason: 'external_reference_missing' };
+      }
 
-    // 3. Atualizar status com base no payload do provedor
-    if (status === 'paid' || status === 'approved') {
-      await this.prisma.order.update({
-        where: { id: order.id },
-        data: {
-          status: 'PAID',
-          providerTransactionNsu: transaction_nsu,
-          receiptUrl: receipt_url,
-        }
+      const order = await this.prisma.order.findUnique({
+        where: { orderNsu },
       });
-      this.logger.log(`Pedido ${order_nsu} atualizado para PAGO com sucesso.`);
-    } 
-    else if (status === 'expired' || status === 'canceled' || status === 'declined') {
-      await this.prisma.order.update({
-        where: { id: order.id },
-        data: { status: status === 'expired' ? 'EXPIRED' : 'CANCELLED' }
-      });
-      this.logger.log(`Pedido ${order_nsu} atualizado para ${status}.`);
-    }
 
-    // O status HTTP 200 é retornado automaticamente graças ao @HttpCode(HttpStatus.OK)
-    // Isso evita que a InfinitePay fique repetindo o envio eternamente.
-    return { received: true, processed: true };
+      if (!order) {
+        this.logger.warn(`[ASAAS WEBHOOK] Pedido não encontrado: ${orderNsu}`);
+        return { received: true, ignored: true, reason: 'order_not_found' };
+      }
+
+      // Idempotência
+      if (order.status === 'PAID') {
+        this.logger.log(
+          `[ASAAS WEBHOOK] Pedido ${orderNsu} já está PAGO. Ignorando duplicado.`,
+        );
+        return { received: true, status: 'already_paid' };
+      }
+
+      const providerTransactionNsu = payment?.id || null;
+      const receiptUrl = payment?.invoiceUrl || null;
+      const paymentStatus = payment?.status;
+
+      // Eventos de pagamento confirmado
+      const isPaidEvent =
+        event === 'PAYMENT_RECEIVED' ||
+        event === 'PAYMENT_CONFIRMED' ||
+        (event === 'PAYMENT_UPDATED' &&
+          (paymentStatus === 'RECEIVED' || paymentStatus === 'CONFIRMED'));
+
+      if (isPaidEvent) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            status: 'PAID',
+            providerTransactionNsu,
+            receiptUrl,
+          },
+        });
+
+        this.logger.log(`[ASAAS WEBHOOK] Pedido ${orderNsu} atualizado para PAID.`);
+        return { received: true, processed: true, status: 'PAID' };
+      }
+
+      // Expirado / vencido
+      const isExpiredEvent =
+        event === 'PAYMENT_OVERDUE' || paymentStatus === 'OVERDUE';
+
+      if (isExpiredEvent) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            status: 'EXPIRED',
+            providerTransactionNsu,
+            receiptUrl,
+          },
+        });
+
+        this.logger.log(`[ASAAS WEBHOOK] Pedido ${orderNsu} atualizado para EXPIRED.`);
+        return { received: true, processed: true, status: 'EXPIRED' };
+      }
+
+      // Cancelado / removido / estornado
+      const isCancelledEvent =
+        event === 'PAYMENT_DELETED' ||
+        event === 'PAYMENT_REFUNDED' ||
+        paymentStatus === 'DELETED' ||
+        paymentStatus === 'REFUNDED';
+
+      if (isCancelledEvent) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: {
+            status: 'CANCELLED',
+            providerTransactionNsu,
+            receiptUrl,
+          },
+        });
+
+        this.logger.log(
+          `[ASAAS WEBHOOK] Pedido ${orderNsu} atualizado para CANCELLED.`,
+        );
+        return { received: true, processed: true, status: 'CANCELLED' };
+      }
+
+      // Qualquer outro evento: apenas registra e mantém PENDING
+      this.logger.log(
+        `[ASAAS WEBHOOK] Evento ${event} recebido para ${orderNsu}, sem alteração de status.`,
+      );
+
+      return { received: true, processed: false, ignoredEvent: event };
+    } catch (error: any) {
+      this.logger.error(
+        `[ASAAS WEBHOOK] Erro ao processar webhook: ${error.message}`,
+        error.stack,
+      );
+
+      // Sempre 200 pra evitar flood de retries
+      return { received: true, processed: false, error: true };
+    }
   }
 }

@@ -1,12 +1,11 @@
-import { ArrayNotEmpty, IsArray, IsInt, IsString, Min } from 'class-validator';
+import { IsArray, IsString, ArrayNotEmpty, IsNumber } from 'class-validator';
 
-export class CreateCheckoutDto {
+export class CreateAsaasCheckoutDto {
   @IsString()
   raffleId: string;
 
   @IsArray()
   @ArrayNotEmpty()
-  @IsInt({ each: true })
-  @Min(1, { each: true })
+  @IsNumber({}, { each: true })
   selectedTickets: number[];
 }
