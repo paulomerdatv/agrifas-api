@@ -1,217 +1,165 @@
-import {
-  BadRequestException,
-  Injectable,
-  InternalServerErrorException,
-  NotFoundException,
+import { 
+  Injectable, 
+  NotFoundException, 
+  BadRequestException, 
+  InternalServerErrorException, 
+  Logger 
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateCheckoutDto } from './dto/create-checkout.dto';
-import { randomUUID } from 'crypto';
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
-  async createInfinitePayCheckout(jwtUser: { userId: string }, dto: CreateCheckoutDto) {
-    const { raffleId, selectedTickets } = dto;
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: jwtUser.userId },
-    });
-
-    if (!user) {
-      throw new NotFoundException('Usuário não encontrado.');
-    }
-
-    const raffle = await this.prisma.raffle.findUnique({
-      where: { id: raffleId },
-    });
-
-    if (!raffle) {
-      throw new NotFoundException('Rifa não encontrada.');
-    }
-
-    if (!selectedTickets.length) {
-      throw new BadRequestException('Nenhuma cota foi selecionada.');
-    }
-
-    const uniqueTickets = [...new Set(selectedTickets)];
-
-    if (uniqueTickets.length !== selectedTickets.length) {
-      throw new BadRequestException('Há cotas duplicadas na seleção.');
-    }
-
-    // Ajuste esta validação se sua modelagem de rifa tiver outro campo de limite total
-    if (raffle.totalTickets) {
-      const invalidTicket = uniqueTickets.find(
-        (ticket) => ticket < 1 || ticket > raffle.totalTickets,
-      );
-
-      if (invalidTicket) {
-        throw new BadRequestException(`A cota ${invalidTicket} é inválida para esta rifa.`);
-      }
-    }
-
-    // Verifica se alguma dessas cotas já foi paga em outros pedidos
-    const paidOrders = await this.prisma.order.findMany({
-      where: {
-        raffleId,
-        status: 'PAID',
-      },
-      select: {
-        selectedTickets: true,
-      },
-    });
-
-    const alreadySoldTickets = new Set(
-      paidOrders.flatMap((order) => order.selectedTickets),
-    );
-
-    const conflictedTickets = uniqueTickets.filter((ticket) =>
-      alreadySoldTickets.has(ticket),
-    );
-
-    if (conflictedTickets.length > 0) {
-      throw new BadRequestException(
-        `As seguintes cotas já foram vendidas: ${conflictedTickets.join(', ')}`,
-      );
-    }
-
-    // Se existir campo específico por rifa, use-o. Ex.: raffle.pricePerTicket
-    if (!raffle.pricePerTicket || Number(raffle.pricePerTicket) <= 0) {
-      throw new BadRequestException('Preço da cota da rifa inválido.');
-    }
-
-    const totalAmount = Number(raffle.pricePerTicket) * uniqueTickets.length;
-
-    const handle = process.env.INFINITEPAY_HANDLE;
-    const apiUrl = process.env.INFINITEPAY_API_URL;
-    const checkoutPath = process.env.INFINITEPAY_CHECKOUT_PATH;
-
-    if (!handle) {
-      throw new InternalServerErrorException('INFINITEPAY_HANDLE não configurado.');
-    }
-
-    if (!apiUrl || !checkoutPath) {
-      throw new InternalServerErrorException(
-        'Variáveis da InfinitePay não configuradas corretamente.',
-      );
-    }
-
-    const orderNsu = `AGRIFAS-${randomUUID()}`;
-
-    const order = await this.prisma.order.create({
-      data: {
-        userId: user.id,
-        raffleId: raffle.id,
-        selectedTickets: uniqueTickets,
-        totalAmount,
-        status: 'PENDING',
-        provider: 'INFINITEPAY',
-        orderNsu,
-        paymentMethod: 'PIX',
-      },
-    });
-
-    const payload: any = {
-      handle,
-      items: [
-        {
-          quantity: 1,
-          price: Math.round(totalAmount * 100), // centavos
-          description: `Cotas da rifa ${raffle.title} (${uniqueTickets.join(', ')})`,
-        },
-      ],
-    };
-
+  async createInfinitePayCheckout(jwtUser: any, raffleId: string, selectedTickets: number[]) {
     try {
-      const response = await fetch(`${apiUrl}${checkoutPath}`, {
+      this.logger.log(`Iniciando geração de checkout para o usuário ${jwtUser.userId}, Rifa: ${raffleId}`);
+
+      // 1. Busca o usuário real no banco para garantir consistência
+      const user = await this.prisma.user.findUnique({ 
+        where: { id: jwtUser.userId } 
+      });
+      
+      if (!user) {
+        throw new NotFoundException('Usuário não encontrado no banco de dados.');
+      }
+
+      // 2. Valida Rifa
+      const raffle = await this.prisma.raffle.findUnique({ 
+        where: { id: raffleId } 
+      });
+      
+      if (!raffle) {
+        throw new NotFoundException('Rifa não encontrada.');
+      }
+      
+      if (!selectedTickets || selectedTickets.length === 0) {
+        throw new BadRequestException('Nenhum número selecionado.');
+      }
+
+      // 3. Valida conflito de cotas (Verifica se já não foram pagas)
+      const existingOrders = await this.prisma.order.findMany({
+        where: { raffleId, status: 'PAID' }
+      });
+      const soldTickets = existingOrders.flatMap(o => o.selectedTickets);
+      const hasConflict = selectedTickets.some(t => soldTickets.includes(t));
+      
+      if (hasConflict) {
+        throw new BadRequestException('Algumas cotas selecionadas já foram vendidas.');
+      }
+
+      const totalAmount = selectedTickets.length * raffle.pricePerTicket;
+      const orderNsu = `AG-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+      // 4. Cria o Pedido PENDING
+      const order = await this.prisma.order.create({
+        data: {
+          userId: user.id,
+          raffleId,
+          selectedTickets,
+          totalAmount,
+          status: 'PENDING',
+          provider: 'INFINITEPAY',
+          orderNsu,
+        }
+      });
+
+      // 5. Setup de Variáveis da InfinitePay
+      const baseUrl = process.env.INFINITEPAY_API_URL || 'https://api.infinitepay.io';
+      const checkoutPath = process.env.INFINITEPAY_CHECKOUT_PATH || '/v2/payment-links';
+      const apiKey = process.env.INFINITEPAY_API_KEY;
+      const frontendUrl = process.env.FRONTEND_URL;
+      const backendUrl = process.env.BACKEND_URL;
+
+      if (!apiKey || !frontendUrl || !backendUrl) {
+        this.logger.error('Configurações de pagamento (env) ausentes no servidor.');
+        throw new InternalServerErrorException('Configurações de pagamento ausentes no servidor.');
+      }
+
+      // 6. Montagem Dinâmica do Payload Seguro
+      // Usamos um payload mais simplificado para evitar rejeição por campos de customer inválidos (CPF/Tel)
+      const infinitePayPayload = {
+        amount: Math.round(totalAmount * 100), // InfinitePay exige valor em centavos inteiros (ex: R$ 10,50 vira 1050)
+        description: `Cotas: ${raffle.title.substring(0, 40)} (${selectedTickets.join(', ').substring(0, 50)})`,
+        redirect_url: `${frontendUrl}/pagamento/retorno?orderNsu=${orderNsu}`,
+        webhook_url: `${backendUrl}/webhooks/infinitepay`,
+        metadata: {
+          order_nsu: orderNsu,
+          customer_email: user.email,
+          customer_name: user.name
+        }
+      };
+
+      this.logger.log(`Enviando Payload para InfinitePay: ${JSON.stringify(infinitePayPayload)}`);
+
+      // 7. Chamada externa à InfinitePay
+      const response = await fetch(`${baseUrl}${checkoutPath}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'Accept': 'application/json'
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(infinitePayPayload)
       });
 
-      const responseData = await response.json().catch(() => null);
-
+      // Lendo a resposta em texto bruto primeiro para poder logar erros com precisão
+      const responseText = await response.text();
+      this.logger.log(`Status HTTP da InfinitePay: ${response.status}`);
+      
       if (!response.ok) {
+        this.logger.error(`Erro retornado pela InfinitePay: ${responseText}`);
+        // Falha externa: atualiza para FAILED para liberar a tentativa
         await this.prisma.order.update({
           where: { id: order.id },
-          data: { status: 'FAILED' },
+          data: { status: 'FAILED' }
         });
-
-        throw new BadRequestException({
-          message: 'Falha ao criar checkout na InfinitePay.',
-          statusCode: response.status,
-          providerResponse: responseData,
-        });
+        throw new InternalServerErrorException(`Falha ao gerar cobrança: Detalhes no log do servidor.`);
       }
 
-      const checkoutUrl = responseData?.checkout_url;
+      // Faz o parse do JSON caso tenha dado sucesso
+      const responseData = JSON.parse(responseText);
+
+      // O campo da URL depende da resposta oficial (checamos os mais comuns)
+      const checkoutUrl = responseData.url || responseData.payment_url || responseData.checkout_url;
 
       if (!checkoutUrl) {
-        await this.prisma.order.update({
-          where: { id: order.id },
-          data: { status: 'FAILED' },
-        });
-
-        throw new InternalServerErrorException(
-          'checkout_url não devolvida pela InfinitePay.',
-        );
+        this.logger.error(`InfinitePay respondeu com sucesso, mas sem URL: ${responseText}`);
+        throw new InternalServerErrorException('URL de checkout não devolvida pela InfinitePay.');
       }
 
+      // Sucesso: Retorna o contrato esperado
       return {
         orderId: order.id,
         orderNsu: order.orderNsu,
-        checkoutUrl,
+        checkoutUrl: checkoutUrl,
+        checkout_url: checkoutUrl // Garante o contrato exigido pelo frontend
       };
-    } catch (error) {
-      // Evita sobrescrever erro já tratado
-      if (error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+
+    } catch (error: any) {
+      this.logger.error(`Erro Fatal em createInfinitePayCheckout: ${error.message}`, error.stack);
+      
+      // Repassa erros de negócio corretamente sem envelopar em 500 genérico
+      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof InternalServerErrorException) {
         throw error;
       }
-
-      await this.prisma.order.update({
-        where: { id: order.id },
-        data: { status: 'FAILED' },
-      });
-
-      throw new InternalServerErrorException({
-        message: 'Erro inesperado ao criar checkout.',
-        error: error instanceof Error ? error.message : 'Erro desconhecido',
-      });
+      
+      throw new InternalServerErrorException('Erro interno inexperado ao processar o pagamento.');
     }
   }
 
-  async checkOrderStatus(orderNsu: string) {
+  async checkPaymentStatus(orderNsu: string) {
     const order = await this.prisma.order.findUnique({
       where: { orderNsu },
-      include: {
-        raffle: true,
-      },
+      select: { id: true, status: true, receiptUrl: true, totalAmount: true }
     });
-
+    
     if (!order) {
       throw new NotFoundException('Pedido não encontrado.');
     }
-
-    return {
-      orderId: order.id,
-      orderNsu: order.orderNsu,
-      status: order.status,
-      totalAmount: order.totalAmount,
-      selectedTickets: order.selectedTickets,
-      raffle: order.raffle
-        ? {
-            id: order.raffle.id,
-            title: order.raffle.title,
-          }
-        : null,
-      receiptUrl: order.receiptUrl,
-      paymentMethod: order.paymentMethod,
-      createdAt: order.createdAt,
-      updatedAt: order.updatedAt,
-    };
+    
+    return order;
   }
 }

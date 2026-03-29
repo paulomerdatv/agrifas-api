@@ -1,190 +1,67 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common';
+import { Controller, Post, Body, Headers, HttpCode, HttpStatus, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
-@Controller('webhooks')
+@Controller('webhooks/infinitepay')
 export class WebhooksController {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(WebhooksController.name);
 
-  @Post('infinitepay')
-  @HttpCode(200)
-  async handleInfinitePayWebhook(@Body() body: any) {
-    /**
-     * IMPORTANTE:
-     * Como o payload completo do webhook ainda não foi 100% confirmado,
-     * este controller tenta ler os campos mais prováveis sem quebrar.
-     *
-     * Assim que você tiver um exemplo real do webhook, vale a pena
-     * travar isso com DTO específico.
-     */
+  constructor(private prisma: PrismaService) {}
 
-    const orderNsu =
-      body?.orderNsu ??
-      body?.order_nsu ??
-      body?.metadata?.orderNsu ??
-      body?.metadata?.order_nsu ??
-      body?.reference ??
-      body?.reference_id;
+  @Post()
+  @HttpCode(HttpStatus.OK)
+  async handleInfinitePayWebhook(
+    @Body() payload: any,
+    @Headers('x-infinitepay-signature') signature: string
+  ) {
+    this.logger.log(`Webhook InfinitePay recebido: ${JSON.stringify(payload)}`);
 
-    const providerTransactionNsu =
-      body?.transactionNsu ??
-      body?.transaction_nsu ??
-      body?.id ??
-      body?.payment_id ??
-      null;
+    // DICA DE SEGURANÇA: Em produção, você DEVE validar a "signature" do webhook 
+    // cruzando com o INFINITEPAY_WEBHOOK_SECRET para garantir que a origem é a InfinitePay.
 
-    const receiptUrl =
-      body?.receiptUrl ??
-      body?.receipt_url ??
-      body?.payment_receipt_url ??
-      null;
+    const { order_nsu, status, transaction_nsu, receipt_url } = payload;
 
-    const providerStatusRaw =
-      String(
-        body?.status ??
-          body?.payment_status ??
-          body?.invoice_status ??
-          '',
-      ).toUpperCase();
-
-    if (!orderNsu) {
-      return {
-        received: true,
-        ignored: true,
-        reason: 'orderNsu não encontrado no payload',
-      };
+    if (!order_nsu) {
+      return { received: true, ignored: true, reason: 'order_nsu_missing' };
     }
 
+    // 1. Localizar o pedido pelo NSU único
     const order = await this.prisma.order.findUnique({
-      where: { orderNsu },
-      include: {
-        raffle: true,
-      },
+      where: { orderNsu: order_nsu }
     });
 
     if (!order) {
-      return {
-        received: true,
-        ignored: true,
-        reason: 'pedido não encontrado',
-      };
+      this.logger.warn(`Pedido não encontrado para NSU: ${order_nsu}`);
+      return { received: true, ignored: true, reason: 'order_not_found' };
     }
 
-    // Idempotência
+    // 2. Garantir a Idempotência (Evitar processamento duplicado)
     if (order.status === 'PAID') {
-      return {
-        received: true,
-        ignored: true,
-        reason: 'pedido já estava pago',
-      };
+      this.logger.log(`Pedido ${order_nsu} já estava marcado como PAGO. Ignorando webhook duplicado.`);
+      return { received: true, status: 'already_paid' };
     }
 
-    const mappedStatus = this.mapProviderStatus(providerStatusRaw);
-
-    if (!mappedStatus) {
-      return {
-        received: true,
-        ignored: true,
-        reason: `status não mapeado: ${providerStatusRaw || 'vazio'}`,
-      };
-    }
-
-    if (mappedStatus === 'PAID') {
-      await this.prisma.$transaction(async (tx) => {
-        const currentOrder = await tx.order.findUnique({
-          where: { orderNsu },
-        });
-
-        if (!currentOrder) {
-          return;
+    // 3. Atualizar status com base no payload do provedor
+    if (status === 'paid' || status === 'approved') {
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'PAID',
+          providerTransactionNsu: transaction_nsu,
+          receiptUrl: receipt_url,
         }
-
-        if (currentOrder.status === 'PAID') {
-          return;
-        }
-
-        await tx.order.update({
-          where: { orderNsu },
-          data: {
-            status: 'PAID',
-            providerTransactionNsu,
-            receiptUrl,
-          },
-        });
-
-        await tx.raffle.update({
-          where: { id: order.raffleId },
-          data: {
-            soldTickets: {
-              increment: order.selectedTickets.length,
-            },
-          },
-        });
       });
-
-      return {
-        received: true,
-        processed: true,
-        status: 'PAID',
-      };
+      this.logger.log(`Pedido ${order_nsu} atualizado para PAGO com sucesso.`);
+    } 
+    else if (status === 'expired' || status === 'canceled' || status === 'declined') {
+      await this.prisma.order.update({
+        where: { id: order.id },
+        data: { status: status === 'expired' ? 'EXPIRED' : 'CANCELLED' }
+      });
+      this.logger.log(`Pedido ${order_nsu} atualizado para ${status}.`);
     }
 
-    await this.prisma.order.update({
-      where: { orderNsu },
-      data: {
-        status: mappedStatus,
-        providerTransactionNsu,
-        receiptUrl,
-      },
-    });
-
-    return {
-      received: true,
-      processed: true,
-      status: mappedStatus,
-    };
-  }
-
-  private mapProviderStatus(status: string):
-    | 'PENDING'
-    | 'PAID'
-    | 'FAILED'
-    | 'EXPIRED'
-    | 'CANCELLED'
-    | null {
-    if (!status) return null;
-
-    const normalized = status.toUpperCase();
-
-    if (
-      ['PAID', 'APPROVED', 'COMPLETED', 'SUCCESS', 'SUCCEEDED'].includes(normalized)
-    ) {
-      return 'PAID';
-    }
-
-    if (
-      ['PENDING', 'WAITING', 'WAITING_PAYMENT', 'PROCESSING', 'CREATED'].includes(normalized)
-    ) {
-      return 'PENDING';
-    }
-
-    if (
-      ['FAILED', 'REFUSED', 'DENIED', 'ERROR'].includes(normalized)
-    ) {
-      return 'FAILED';
-    }
-
-    if (
-      ['EXPIRED', 'TIMEOUT'].includes(normalized)
-    ) {
-      return 'EXPIRED';
-    }
-
-    if (
-      ['CANCELLED', 'CANCELED', 'VOIDED'].includes(normalized)
-    ) {
-      return 'CANCELLED';
-    }
-
-    return null;
+    // O status HTTP 200 é retornado automaticamente graças ao @HttpCode(HttpStatus.OK)
+    // Isso evita que a InfinitePay fique repetindo o envio eternamente.
+    return { received: true, processed: true };
   }
 }

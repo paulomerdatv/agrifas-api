@@ -1,19 +1,20 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import * as express from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
   app.enableCors({
-    origin: [
-      'http://localhost:5173',
-      'https://agrifas-561ea.web.app',
-      'https://agrifas-561ea.firebaseapp.com',
-    ],
+    origin: true,
     credentials: true,
   });
 
-  await app.listen(3000);
-  console.log('🚀 Servidor rodando na porta 3000');
+  await app.listen(process.env.PORT || 3000);
 }
 bootstrap();
