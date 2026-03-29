@@ -107,7 +107,11 @@ export class PaymentsService {
 
       // Lendo a resposta em texto bruto primeiro para poder logar erros com precisão
       const responseText = await response.text();
-      this.logger.log(`Status HTTP da InfinitePay: ${response.status}`);
+            this.logger.log(`INFINITEPAY BASE URL: ${baseUrl}`);
+            this.logger.log(`INFINITEPAY CHECKOUT PATH: ${checkoutPath}`);
+            this.logger.log(`INFINITEPAY PAYLOAD: ${JSON.stringify(infinitePayPayload)}`);
+            this.logger.log(`INFINITEPAY STATUS: ${response.status}`);
+            this.logger.log(`INFINITEPAY RAW RESPONSE: ${responseText}`);
       
       if (!response.ok) {
         this.logger.error(`Erro retornado pela InfinitePay: ${responseText}`);
@@ -120,7 +124,20 @@ export class PaymentsService {
       }
 
       // Faz o parse do JSON caso tenha dado sucesso
-      const responseData = JSON.parse(responseText);
+      let responseData: any = null;
+
+try {
+  responseData = JSON.parse(responseText);
+} catch (error) {
+  this.logger.error(`INFINITEPAY JSON PARSE ERROR: ${responseText}`);
+  await this.prisma.order.update({
+    where: { id: order.id },
+    data: { status: 'FAILED' },
+  });
+  throw new InternalServerErrorException(
+    'InfinitePay retornou resposta inválida. Verifique os logs.',
+  );
+}
 
       // O campo da URL depende da resposta oficial (checamos os mais comuns)
       const checkoutUrl = responseData.url || responseData.payment_url || responseData.checkout_url;
