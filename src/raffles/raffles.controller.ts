@@ -37,15 +37,24 @@ export class RafflesController {
 
   @Get()
   async findAll() {
+    // Calcula o limite de 10 minutos atrás
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+
     const raffles = await this.prisma.raffle.findMany({
       where: { 
-        // CORREÇÃO: O status 'ENDING' foi removido para bater com o Schema atual.
         status: { in: ['ACTIVE'] } 
       },
       include: {
         orders: {
+          // Traz apenas pedidos PAID ou PENDING criados nos últimos 10 minutos
           where: {
-            status: { in: ['PAID', 'PENDING'] }
+            OR: [
+              { status: 'PAID' },
+              { 
+                status: 'PENDING',
+                createdAt: { gte: tenMinutesAgo }
+              }
+            ]
           },
           select: { selectedTickets: true, status: true }
         }
@@ -58,12 +67,22 @@ export class RafflesController {
 
   @Get(':id')
   async findOne(@Param('id') id: string) {
+    // Calcula o limite de 10 minutos atrás
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+
     const raffle = await this.prisma.raffle.findUnique({
       where: { id },
       include: {
         orders: {
+          // Traz apenas pedidos PAID ou PENDING criados nos últimos 10 minutos
           where: {
-            status: { in: ['PAID', 'PENDING'] }
+            OR: [
+              { status: 'PAID' },
+              { 
+                status: 'PENDING',
+                createdAt: { gte: tenMinutesAgo }
+              }
+            ]
           },
           select: { selectedTickets: true, status: true }
         }
