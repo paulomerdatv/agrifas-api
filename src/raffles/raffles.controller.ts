@@ -5,72 +5,55 @@ import { PrismaService } from '../prisma/prisma.service';
 export class RafflesController {
   constructor(private readonly prisma: PrismaService) {}
 
+  // Função auxiliar para mapear os tickets e status corretamente
+  private formatRaffleWithTickets(raffle: any) {
+    const paidOrders = raffle.orders?.filter((o: any) => o.status === 'PAID') || [];
+    const pendingOrders = raffle.orders?.filter((o: any) => o.status === 'PENDING') || [];
+
+    const soldNumbers: number[] = paidOrders.flatMap((o: any) => o.selectedTickets);
+    const reservedNumbers: number[] = pendingOrders.flatMap((o: any) => o.selectedTickets);
+
+    const tickets = Array.from({ length: raffle.totalTickets }, (_, i) => {
+      const number = i + 1;
+      let status = 'available';
+      
+      if (soldNumbers.includes(number)) {
+        status = 'sold';
+      } else if (reservedNumbers.includes(number)) {
+        status = 'reserved';
+      }
+      
+      return { number, status };
+    });
+
+    return {
+      ...raffle,
+      tickets,
+      soldTickets: [...soldNumbers, ...reservedNumbers], 
+      soldCount: soldNumbers.length,
+      reservedCount: reservedNumbers.length,
+    };
+  }
+
   @Get()
   async findAll() {
     const raffles = await this.prisma.raffle.findMany({
-      where: {
-        status: {
-          in: ['ACTIVE'],
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
+      where: { 
+        // CORREÇÃO: O status 'ENDING' foi removido para bater com o Schema atual.
+        status: { in: ['ACTIVE'] } 
       },
       include: {
         orders: {
           where: {
-            status: {
-              in: ['PAID', 'PENDING'],
-            },
+            status: { in: ['PAID', 'PENDING'] }
           },
-          select: {
-            selectedTickets: true,
-            status: true,
-          },
-        },
-      },
-    });
-
-    return raffles.map((raffle) => {
-      const tickets = Array.from({ length: raffle.totalTickets }, (_, i) => {
-        const ticketNumber = i + 1;
-
-        let status: 'available' | 'reserved' | 'sold' = 'available';
-
-        const paidOrder = raffle.orders.find(
-          (order) =>
-            order.status === 'PAID' &&
-            order.selectedTickets.includes(ticketNumber),
-        );
-
-        const pendingOrder = raffle.orders.find(
-          (order) =>
-            order.status === 'PENDING' &&
-            order.selectedTickets.includes(ticketNumber),
-        );
-
-        if (paidOrder) {
-          status = 'sold';
-        } else if (pendingOrder) {
-          status = 'reserved';
+          select: { selectedTickets: true, status: true }
         }
-
-        return {
-          number: ticketNumber,
-          status,
-        };
-      });
-
-      const soldTickets = tickets
-        .filter((t) => t.status === 'sold' || t.status === 'reserved')
-        .map((t) => t.number);
-
-      return {
-        ...raffle,
-        tickets,
-        soldTickets,
-      };
+      },
+      orderBy: { createdAt: 'desc' }
     });
+
+    return raffles.map(r => this.formatRaffleWithTickets(r));
   }
 
   @Get(':id')
@@ -80,59 +63,17 @@ export class RafflesController {
       include: {
         orders: {
           where: {
-            status: {
-              in: ['PAID', 'PENDING'],
-            },
+            status: { in: ['PAID', 'PENDING'] }
           },
-          select: {
-            selectedTickets: true,
-            status: true,
-          },
-        },
-      },
+          select: { selectedTickets: true, status: true }
+        }
+      }
     });
 
     if (!raffle) {
       throw new NotFoundException('Rifa não encontrada.');
     }
 
-    const tickets = Array.from({ length: raffle.totalTickets }, (_, i) => {
-      const ticketNumber = i + 1;
-
-      let status: 'available' | 'reserved' | 'sold' = 'available';
-
-      const paidOrder = raffle.orders.find(
-        (order) =>
-          order.status === 'PAID' &&
-          order.selectedTickets.includes(ticketNumber),
-      );
-
-      const pendingOrder = raffle.orders.find(
-        (order) =>
-          order.status === 'PENDING' &&
-          order.selectedTickets.includes(ticketNumber),
-      );
-
-      if (paidOrder) {
-        status = 'sold';
-      } else if (pendingOrder) {
-        status = 'reserved';
-      }
-
-      return {
-        number: ticketNumber,
-        status,
-      };
-    });
-
-    const soldTickets = tickets
-      .filter((t) => t.status === 'sold' || t.status === 'reserved')
-      .map((t) => t.number);
-
-    return {
-      ...raffle,
-      tickets,
-      soldTickets,
-    };
+    return this.formatRaffleWithTickets(raffle);
   }
 }
