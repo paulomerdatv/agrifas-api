@@ -82,9 +82,9 @@ export class PaymentsService {
         },
       });
 
-      const handle = process.env.INFINITEPAY_HANDLE;
+      const rawHandle = process.env.INFINITEPAY_HANDLE;
 
-      if (!handle) {
+      if (!rawHandle) {
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
@@ -96,11 +96,13 @@ export class PaymentsService {
         );
       }
 
+      const handle = rawHandle.startsWith('$') ? rawHandle : `$${rawHandle}`;
+
       const amountCents = Math.round(totalAmount * 100);
       const itemName = `Rifa ${raffle.title}`.substring(0, 80);
 
       const checkoutUrl =
-        `https://checkout.infinitepay.io/${handle}` +
+        `https://checkout.infinitepay.io/${encodeURIComponent(handle)}` +
         `?name=${encodeURIComponent(itemName)}` +
         `&price=${amountCents}` +
         `&quantity=1` +
