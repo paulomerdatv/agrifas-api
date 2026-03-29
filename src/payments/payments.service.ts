@@ -72,7 +72,8 @@ export class PaymentsService {
       });
 
       const apiKey = process.env.ASAAS_API_KEY;
-      const baseUrl = process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3';
+      const baseUrl =
+        process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3';
 
       if (!apiKey) {
         this.logger.error('ASAAS_API_KEY não configurada no .env');
@@ -82,6 +83,7 @@ export class PaymentsService {
       }
 
       const sanitizeDigits = (value?: string) => (value || '').replace(/\D/g, '');
+      const sanitizeText = (value?: string) => (value || '').trim();
 
       const customerCpfCnpj =
         sanitizeDigits(customerData?.cpfCnpj) ||
@@ -90,8 +92,8 @@ export class PaymentsService {
         '65929587000163';
 
       const customerPayload: any = {
-        name: customerData?.fullName || user.name,
-        email: customerData?.email || user.email,
+        name: sanitizeText(customerData?.fullName) || sanitizeText(user.name),
+        email: sanitizeText(customerData?.email) || sanitizeText(user.email),
         cpfCnpj: customerCpfCnpj,
       };
 
@@ -110,36 +112,57 @@ export class PaymentsService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Accept: 'application/json',
           access_token: apiKey,
         },
         body: JSON.stringify(customerPayload),
       });
 
+      const customerContentType = customerRes.headers.get('content-type') || '';
       const customerRaw = await customerRes.text();
+
+      this.logger.log(
+        `[Asaas] /customers status=${customerRes.status} content-type=${customerContentType} body=${customerRaw.slice(0, 1000)}`,
+      );
+
       let customerDataResponse: any = null;
       try {
-        customerDataResponse = customerRaw ? JSON.parse(customerRaw) : null;
+        customerDataResponse =
+          customerRaw && customerContentType.includes('application/json')
+            ? JSON.parse(customerRaw)
+            : { raw: customerRaw };
       } catch {
         customerDataResponse = { raw: customerRaw };
       }
 
       if (!customerRes.ok) {
-        this.logger.error(
-          `[Asaas] Erro ao criar cliente | status=${customerRes.status} | body=${JSON.stringify(customerDataResponse)}`,
-        );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
+
         throw new InternalServerErrorException(
           `Erro ao registrar cliente no Asaas: ${
-            customerDataResponse?.errors?.[0]?.description || 'resposta inválida do Asaas'
+            customerDataResponse?.errors?.[0]?.description ||
+            customerDataResponse?.raw ||
+            'resposta inválida do Asaas'
           }`,
         );
       }
 
+      if (!customerDataResponse?.id) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'FAILED' },
+        });
+
+        throw new InternalServerErrorException(
+          `Asaas não retornou um customer.id válido. Resposta: ${customerRaw.slice(0, 300)}`,
+        );
+      }
+
       this.logger.log(
-        `[Asaas] Cliente criado/recuperado com sucesso. ID: ${customerDataResponse?.id}`,
+        `[Asaas] Cliente criado/recuperado com sucesso. ID: ${customerDataResponse.id}`,
       );
 
       const paymentPayload = {
@@ -157,61 +180,95 @@ export class PaymentsService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Accept: 'application/json',
           access_token: apiKey,
         },
         body: JSON.stringify(paymentPayload),
       });
 
+      const paymentContentType = paymentRes.headers.get('content-type') || '';
       const paymentRaw = await paymentRes.text();
+
+      this.logger.log(
+        `[Asaas] /payments status=${paymentRes.status} content-type=${paymentContentType} body=${paymentRaw.slice(0, 1000)}`,
+      );
+
       let paymentData: any = null;
       try {
-        paymentData = paymentRaw ? JSON.parse(paymentRaw) : null;
+        paymentData =
+          paymentRaw && paymentContentType.includes('application/json')
+            ? JSON.parse(paymentRaw)
+            : { raw: paymentRaw };
       } catch {
         paymentData = { raw: paymentRaw };
       }
 
       if (!paymentRes.ok) {
-        this.logger.error(
-          `[Asaas] Erro ao criar cobrança | status=${paymentRes.status} | body=${JSON.stringify(paymentData)}`,
-        );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
+
         throw new InternalServerErrorException(
           `Erro ao gerar a cobrança PIX: ${
-            paymentData?.errors?.[0]?.description || 'resposta inválida do Asaas'
+            paymentData?.errors?.[0]?.description ||
+            paymentData?.raw ||
+            'resposta inválida do Asaas'
           }`,
+        );
+      }
+
+      if (!paymentData?.id) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'FAILED' },
+        });
+
+        throw new InternalServerErrorException(
+          `Asaas não retornou um payment.id válido. Resposta: ${paymentRaw.slice(0, 300)}`,
         );
       }
 
       this.logger.log(`[Asaas] Cobrança criada. ID: ${paymentData.id}`);
 
-      const qrCodeRes = await fetch(`${baseUrl}/payments/${paymentData.id}/pixQrCode`, {
-        headers: {
-          access_token: apiKey,
+      const qrCodeRes = await fetch(
+        `${baseUrl}/payments/${paymentData.id}/pixQrCode`,
+        {
+          headers: {
+            Accept: 'application/json',
+            access_token: apiKey,
+          },
         },
-      });
+      );
 
+      const qrCodeContentType = qrCodeRes.headers.get('content-type') || '';
       const qrCodeRaw = await qrCodeRes.text();
+
+      this.logger.log(
+        `[Asaas] /payments/${paymentData.id}/pixQrCode status=${qrCodeRes.status} content-type=${qrCodeContentType} body=${qrCodeRaw.slice(0, 1000)}`,
+      );
+
       let qrCodeData: any = null;
       try {
-        qrCodeData = qrCodeRaw ? JSON.parse(qrCodeRaw) : null;
+        qrCodeData =
+          qrCodeRaw && qrCodeContentType.includes('application/json')
+            ? JSON.parse(qrCodeRaw)
+            : { raw: qrCodeRaw };
       } catch {
         qrCodeData = { raw: qrCodeRaw };
       }
 
       if (!qrCodeRes.ok) {
-        this.logger.error(
-          `[Asaas] Erro ao buscar QR Code | status=${qrCodeRes.status} | body=${JSON.stringify(qrCodeData)}`,
-        );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
+
         throw new InternalServerErrorException(
           `Erro ao gerar o QR Code do PIX: ${
-            qrCodeData?.errors?.[0]?.description || 'resposta inválida do Asaas'
+            qrCodeData?.errors?.[0]?.description ||
+            qrCodeData?.raw ||
+            'resposta inválida do Asaas'
           }`,
         );
       }
@@ -238,7 +295,10 @@ export class PaymentsService {
         expirationDate: qrCodeData?.expirationDate,
       };
     } catch (error: any) {
-      this.logger.error(`[Asaas Checkout Error] ${error.message}`, error.stack);
+      this.logger.error(
+        `[Asaas Checkout Error] ${error.message}`,
+        error.stack,
+      );
 
       if (
         error instanceof NotFoundException ||
@@ -273,7 +333,11 @@ export class PaymentsService {
     return order;
   }
 
-  async createInfinitePayCheckout(user: any, raffleId: string, selectedTickets: number[]) {
+  async createInfinitePayCheckout(
+    user: any,
+    raffleId: string,
+    selectedTickets: number[],
+  ) {
     return this.createAsaasCheckout(user, { raffleId, selectedTickets });
   }
 

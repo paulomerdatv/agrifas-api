@@ -5,31 +5,41 @@ import { PrismaService } from '../prisma/prisma.service';
 export class RafflesController {
   constructor(private readonly prisma: PrismaService) {}
 
-  // Função auxiliar para mapear os tickets e status corretamente
   private formatRaffleWithTickets(raffle: any) {
-    const paidOrders = raffle.orders?.filter((o: any) => o.status === 'PAID') || [];
-    const pendingOrders = raffle.orders?.filter((o: any) => o.status === 'PENDING') || [];
+    const paidOrders =
+      raffle.orders?.filter((o: any) => o.status === 'PAID') || [];
+
+    const reservedOrders =
+      raffle.orders?.filter((o: any) => {
+        if (o.status !== 'PENDING') return false;
+
+        if (o.provider === 'ADMIN_RESERVE') return true;
+
+        const createdAt = new Date(o.createdAt).getTime();
+        const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+        return createdAt >= tenMinutesAgo;
+      }) || [];
 
     const soldNumbers: number[] = paidOrders.flatMap((o: any) => o.selectedTickets);
-    const reservedNumbers: number[] = pendingOrders.flatMap((o: any) => o.selectedTickets);
+    const reservedNumbers: number[] = reservedOrders.flatMap((o: any) => o.selectedTickets);
 
     const tickets = Array.from({ length: raffle.totalTickets }, (_, i) => {
       const number = i + 1;
       let status = 'available';
-      
+
       if (soldNumbers.includes(number)) {
         status = 'sold';
       } else if (reservedNumbers.includes(number)) {
         status = 'reserved';
       }
-      
+
       return { number, status };
     });
 
     return {
       ...raffle,
       tickets,
-      soldTickets: [...soldNumbers, ...reservedNumbers], 
+      soldTickets: [...soldNumbers, ...reservedNumbers],
       soldCount: soldNumbers.length,
       reservedCount: reservedNumbers.length,
     };
@@ -37,56 +47,40 @@ export class RafflesController {
 
   @Get()
   async findAll() {
-    // Calcula o limite de 10 minutos atrás
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-
     const raffles = await this.prisma.raffle.findMany({
-      where: { 
-        status: { in: ['ACTIVE'] } 
+      where: {
+        status: { in: ['ACTIVE'] },
       },
       include: {
         orders: {
-          // Traz apenas pedidos PAID ou PENDING criados nos últimos 10 minutos
-          where: {
-            OR: [
-              { status: 'PAID' },
-              { 
-                status: 'PENDING',
-                createdAt: { gte: tenMinutesAgo }
-              }
-            ]
+          select: {
+            selectedTickets: true,
+            status: true,
+            provider: true,
+            createdAt: true,
           },
-          select: { selectedTickets: true, status: true }
-        }
+        },
       },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
     });
 
-    return raffles.map(r => this.formatRaffleWithTickets(r));
+    return raffles.map((r) => this.formatRaffleWithTickets(r));
   }
 
   @Get(':id')
   async findOne(@Param('id') id: string) {
-    // Calcula o limite de 10 minutos atrás
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-
     const raffle = await this.prisma.raffle.findUnique({
       where: { id },
       include: {
         orders: {
-          // Traz apenas pedidos PAID ou PENDING criados nos últimos 10 minutos
-          where: {
-            OR: [
-              { status: 'PAID' },
-              { 
-                status: 'PENDING',
-                createdAt: { gte: tenMinutesAgo }
-              }
-            ]
+          select: {
+            selectedTickets: true,
+            status: true,
+            provider: true,
+            createdAt: true,
           },
-          select: { selectedTickets: true, status: true }
-        }
-      }
+        },
+      },
     });
 
     if (!raffle) {
