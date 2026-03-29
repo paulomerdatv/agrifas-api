@@ -13,83 +13,52 @@ export class PaymentsService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async createInfinitePayCheckout(
-    jwtUser: any,
-    raffleOrDto: string | { raffleId: string; selectedTickets: number[] },
-    selectedTicketsArg?: number[],
-  ) {
+  async createAsaasCheckout(jwtUser: any, dto: any) {
+    const { raffleId, selectedTickets } = dto;
+
     try {
-      const raffleId =
-        typeof raffleOrDto === 'string' ? raffleOrDto : raffleOrDto.raffleId;
-
-      const selectedTickets =
-        typeof raffleOrDto === 'string'
-          ? selectedTicketsArg ?? []
-          : raffleOrDto.selectedTickets;
-
       this.logger.log(
-        `Iniciando geração de cobrança ASAAS para o usuário ${jwtUser.userId}, Rifa: ${raffleId}`,
+        `Iniciando checkout Asaas para usuário ${jwtUser.userId}, Rifa: ${raffleId}`,
       );
 
       const user = await this.prisma.user.findUnique({
         where: { id: jwtUser.userId },
       });
-
-      if (!user) {
-        throw new NotFoundException('Usuário não encontrado no banco de dados.');
-      }
+      if (!user) throw new NotFoundException('Usuário não encontrado.');
 
       const raffle = await this.prisma.raffle.findUnique({
         where: { id: raffleId },
       });
-
-      if (!raffle) {
-        throw new NotFoundException('Rifa não encontrada.');
-      }
+      if (!raffle) throw new NotFoundException('Rifa não encontrada.');
 
       if (!selectedTickets || selectedTickets.length === 0) {
         throw new BadRequestException('Nenhum número selecionado.');
       }
 
-      // REGRA CORRETA:
-      // - PAID bloqueia sempre
-      // - PENDING bloqueia só por 10 minutos
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-
       const existingOrders = await this.prisma.order.findMany({
         where: {
           raffleId,
-          OR: [
-            {
-              status: 'PAID',
-            },
-            {
-              status: 'PENDING',
-              createdAt: {
-                gte: tenMinutesAgo,
-              },
-            },
-          ],
+          status: { in: ['PAID', 'PENDING'] },
         },
       });
 
       const occupiedTickets = existingOrders.flatMap((o) => o.selectedTickets);
-      const hasConflict = selectedTickets.some((t) => occupiedTickets.includes(t));
+      const hasConflict = selectedTickets.some((t) =>
+        occupiedTickets.includes(t),
+      );
 
       if (hasConflict) {
         throw new BadRequestException(
-          'Algumas cotas selecionadas já estão reservadas ou vendidas.',
+          'Algumas cotas selecionadas já foram reservadas ou vendidas.',
         );
       }
 
-      const totalAmount = Number(selectedTickets.length * raffle.pricePerTicket);
-
+      const totalAmount = selectedTickets.length * raffle.pricePerTicket;
       const orderNsu = `AG-${Date.now()}-${Math.random()
         .toString(36)
         .substring(2, 8)
         .toUpperCase()}`;
 
-      // 1) Cria pedido local PENDING
       const order = await this.prisma.order.create({
         data: {
           userId: user.id,
@@ -102,158 +71,140 @@ export class PaymentsService {
         },
       });
 
-      const asaasApiKey = process.env.ASAAS_API_KEY;
-      const asaasBaseUrl = process.env.ASAAS_BASE_URL || 'https://api.asaas.com';
+      const apiKey = process.env.ASAAS_API_KEY;
+      const baseUrl =
+        process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3';
 
-      if (!asaasApiKey) {
-        await this.prisma.order.update({
-          where: { id: order.id },
-          data: { status: 'FAILED' },
-        });
-
+      if (!apiKey) {
+        this.logger.error('ASAAS_API_KEY não configurada no .env');
         throw new InternalServerErrorException(
-          'ASAAS_API_KEY não configurada no ambiente.',
+          'Configuração de pagamento ausente no servidor.',
         );
       }
 
-      // 2) Criar cliente no Asaas
-      // Estratégia simples e robusta:
-      // sempre cria cliente novo por enquanto (evita depender de search incerto)
+      const customerCpfCnpj =
+        (user as any).cpfCnpj || (user as any).cpf || '65929587000163';
+      const customerMobilePhone = (user as any).mobilePhone || undefined;
+
       const customerPayload = {
-        name: user.name || 'Cliente AGRifas',
-        email: user.email || undefined,
-        mobilePhone: (user as any).phone || undefined,
+        name: user.name,
+        email: user.email,
+        cpfCnpj: customerCpfCnpj,
+        mobilePhone: customerMobilePhone,
       };
 
-      const customerResponse = await fetch(`${asaasBaseUrl}/v3/customers`, {
+      this.logger.log(
+        `[Asaas] Criando cliente: ${customerPayload.name} / ${customerPayload.email}`,
+      );
+
+      const customerRes = await fetch(`${baseUrl}/customers`, {
         method: 'POST',
         headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          access_token: asaasApiKey,
+          'Content-Type': 'application/json',
+          access_token: apiKey,
         },
         body: JSON.stringify(customerPayload),
       });
 
-      const customerData = await customerResponse.json();
+      const customerData = await customerRes.json();
 
-      if (!customerResponse.ok || !customerData?.id) {
+      if (!customerRes.ok) {
         this.logger.error(
-          `[ASAAS] Erro ao criar cliente: ${JSON.stringify(customerData)}`,
+          `[Asaas] Erro ao criar cliente: ${JSON.stringify(customerData)}`,
         );
-
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
-
         throw new InternalServerErrorException(
-          'Falha ao criar cliente no Asaas.',
+          'Erro ao registrar cliente no provedor de pagamento.',
         );
       }
 
-      const asaasCustomerId = customerData.id;
-
-      // 3) Criar cobrança PIX
-      const dueDate = new Date();
-      dueDate.setDate(dueDate.getDate() + 1);
-
-      const dueDateStr = dueDate.toISOString().split('T')[0];
+      this.logger.log(
+        `[Asaas] Cliente criado/recuperado com sucesso. ID: ${customerData.id}`,
+      );
 
       const paymentPayload = {
-        customer: asaasCustomerId,
+        customer: customerData.id,
         billingType: 'PIX',
         value: totalAmount,
-        dueDate: dueDateStr,
-        description: `AGRifas - ${raffle.title} - cotas ${selectedTickets.join(', ')}`,
+        dueDate: new Date().toISOString().split('T')[0],
+        description: `Pedido ${orderNsu} - ${raffle.title}`,
         externalReference: orderNsu,
       };
 
-      const paymentResponse = await fetch(`${asaasBaseUrl}/v3/payments`, {
+      this.logger.log(`[Asaas] Criando cobrança PIX para o pedido ${orderNsu}`);
+
+      const paymentRes = await fetch(`${baseUrl}/payments`, {
         method: 'POST',
         headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          access_token: asaasApiKey,
+          'Content-Type': 'application/json',
+          access_token: apiKey,
         },
         body: JSON.stringify(paymentPayload),
       });
 
-      const paymentData = await paymentResponse.json();
+      const paymentData = await paymentRes.json();
 
-      if (!paymentResponse.ok || !paymentData?.id) {
+      if (!paymentRes.ok) {
         this.logger.error(
-          `[ASAAS] Erro ao criar cobrança PIX: ${JSON.stringify(paymentData)}`,
+          `[Asaas] Erro ao criar cobrança: ${JSON.stringify(paymentData)}`,
         );
-
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
-
-        throw new InternalServerErrorException(
-          'Falha ao criar cobrança PIX no Asaas.',
-        );
+        throw new InternalServerErrorException('Erro ao gerar a cobrança PIX.');
       }
 
-      // 4) Buscar QR Code PIX
-      const pixResponse = await fetch(
-        `${asaasBaseUrl}/v3/payments/${paymentData.id}/pixQrCode`,
-        {
-          method: 'GET',
-          headers: {
-            accept: 'application/json',
-            access_token: asaasApiKey,
-          },
+      this.logger.log(`[Asaas] Cobrança criada. ID: ${paymentData.id}`);
+
+      const qrCodeRes = await fetch(`${baseUrl}/payments/${paymentData.id}/pixQrCode`, {
+        headers: {
+          access_token: apiKey,
         },
-      );
+      });
 
-      const pixData = await pixResponse.json();
+      const qrCodeData = await qrCodeRes.json();
 
-      if (!pixResponse.ok) {
+      if (!qrCodeRes.ok) {
         this.logger.error(
-          `[ASAAS] Erro ao buscar QR Code PIX: ${JSON.stringify(pixData)}`,
+          `[Asaas] Erro ao buscar QR Code: ${JSON.stringify(qrCodeData)}`,
         );
-
         await this.prisma.order.update({
           where: { id: order.id },
-          data: {
-            providerTransactionNsu: paymentData.id,
-            receiptUrl: paymentData.invoiceUrl || null,
-          },
+          data: { status: 'FAILED' },
         });
-
         throw new InternalServerErrorException(
-          'Cobrança criada, mas falha ao obter QR Code PIX.',
+          'Erro ao gerar o QR Code do PIX.',
         );
       }
 
-      // 5) Salva dados do provedor no pedido
+      this.logger.log(
+        `[Asaas] QR Code recuperado com sucesso para o pedido ${orderNsu}.`,
+      );
+
       await this.prisma.order.update({
         where: { id: order.id },
         data: {
           providerTransactionNsu: paymentData.id,
-          receiptUrl: paymentData.invoiceUrl || null,
+          receiptUrl: paymentData.invoiceUrl,
         },
       });
-
-      this.logger.log(
-        `[ASAAS] Cobrança PIX criada com sucesso. OrderNSU=${orderNsu}, PaymentID=${paymentData.id}`,
-      );
 
       return {
         orderId: order.id,
         orderNsu: order.orderNsu,
         paymentId: paymentData.id,
-        invoiceUrl: paymentData.invoiceUrl || null,
-        pixPayload: pixData?.payload || null,
-        pixEncodedImage: pixData?.encodedImage || null,
-        expirationDate:
-          pixData?.expirationDate || paymentData?.dueDate || dueDateStr,
+        invoiceUrl: paymentData.invoiceUrl,
+        pixPayload: qrCodeData.payload,
+        pixEncodedImage: qrCodeData.encodedImage,
+        expirationDate: qrCodeData.expirationDate,
       };
     } catch (error: any) {
       this.logger.error(
-        `Erro Fatal em createInfinitePayCheckout: ${error.message}`,
+        `[Asaas Checkout Error] ${error.message}`,
         error.stack,
       );
 
@@ -266,12 +217,12 @@ export class PaymentsService {
       }
 
       throw new InternalServerErrorException(
-        'Erro interno inesperado ao processar o pagamento.',
+        'Falha interna ao gerar pagamento PIX dinâmico.',
       );
     }
   }
 
-  async checkPaymentStatus(orderNsu: string) {
+  async checkOrderStatus(orderNsu: string) {
     const order = await this.prisma.order.findUnique({
       where: { orderNsu },
       select: {
@@ -279,10 +230,7 @@ export class PaymentsService {
         status: true,
         receiptUrl: true,
         totalAmount: true,
-        orderNsu: true,
-        provider: true,
         providerTransactionNsu: true,
-        createdAt: true,
       },
     });
 
@@ -293,7 +241,11 @@ export class PaymentsService {
     return order;
   }
 
-  async checkOrderStatus(orderNsu: string) {
-    return this.checkPaymentStatus(orderNsu);
+  async createInfinitePayCheckout(user: any, raffleId: string, selectedTickets: number[]) {
+    return this.createAsaasCheckout(user, { raffleId, selectedTickets });
+  }
+
+  async checkPaymentStatus(orderNsu: string) {
+    return this.checkOrderStatus(orderNsu);
   }
 }
