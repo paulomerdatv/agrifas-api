@@ -52,15 +52,20 @@ export class PaymentsService {
       }
 
       const existingOrders = await this.prisma.order.findMany({
-        where: { raffleId, status: 'PAID' },
+        where: {
+          raffleId,
+          status: {
+            in: ['PAID', 'PENDING'],
+          },
+        },
       });
 
-      const soldTickets = existingOrders.flatMap((o) => o.selectedTickets);
-      const hasConflict = selectedTickets.some((t) => soldTickets.includes(t));
+      const occupiedTickets = existingOrders.flatMap((o) => o.selectedTickets);
+      const hasConflict = selectedTickets.some((t) => occupiedTickets.includes(t));
 
       if (hasConflict) {
         throw new BadRequestException(
-          'Algumas cotas selecionadas já foram vendidas.',
+          'Algumas cotas selecionadas já estão reservadas ou vendidas.',
         );
       }
 
@@ -82,34 +87,13 @@ export class PaymentsService {
         },
       });
 
-      const rawHandle = process.env.INFINITEPAY_HANDLE;
-
-      if (!rawHandle) {
-        await this.prisma.order.update({
-          where: { id: order.id },
-          data: { status: 'FAILED' },
-        });
-
-        this.logger.error('INFINITEPAY_HANDLE não configurado no servidor.');
-        throw new InternalServerErrorException(
-          'INFINITEPAY_HANDLE não configurado no servidor.',
-        );
-      }
-
-      const handle = rawHandle.startsWith('$') ? rawHandle : `$${rawHandle}`;
-
-      const amountCents = Math.round(totalAmount * 100);
-      const itemName = `Rifa ${raffle.title}`.substring(0, 80);
-
+      // LINK FIXO REAL GERADO NO PAINEL DA INFINITEPAY
       const checkoutUrl =
-        `https://checkout.infinitepay.io/${encodeURIComponent(handle)}` +
-        `?name=${encodeURIComponent(itemName)}` +
-        `&price=${amountCents}` +
-        `&quantity=1` +
-        `&external_reference=${encodeURIComponent(orderNsu)}`;
+        process.env.INFINITEPAY_FIXED_CHECKOUT_URL ||
+        'https://checkout.infinitepay.io/arthur-65929587-38f/1sx42XLkNv';
 
       this.logger.log(
-        `[PaymentsService] Checkout URL gerada localmente: ${checkoutUrl}`,
+        `[PaymentsService] Checkout FIXO da InfinitePay retornado: ${checkoutUrl}`,
       );
 
       return {
