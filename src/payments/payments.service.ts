@@ -14,7 +14,7 @@ export class PaymentsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createAsaasCheckout(jwtUser: any, dto: any) {
-    const { raffleId, selectedTickets } = dto;
+    const { raffleId, selectedTickets, customerData } = dto;
 
     try {
       this.logger.log(
@@ -72,8 +72,7 @@ export class PaymentsService {
       });
 
       const apiKey = process.env.ASAAS_API_KEY;
-      const baseUrl =
-        process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3';
+      const baseUrl = process.env.ASAAS_BASE_URL || 'https://api.asaas.com/v3';
 
       if (!apiKey) {
         this.logger.error('ASAAS_API_KEY não configurada no .env');
@@ -82,16 +81,26 @@ export class PaymentsService {
         );
       }
 
-      const customerCpfCnpj =
-        (user as any).cpfCnpj || (user as any).cpf || '65929587000163';
-      const customerMobilePhone = (user as any).mobilePhone || undefined;
+      const sanitizeDigits = (value?: string) => (value || '').replace(/\D/g, '');
 
-      const customerPayload = {
-        name: user.name,
-        email: user.email,
+      const customerCpfCnpj =
+        sanitizeDigits(customerData?.cpfCnpj) ||
+        sanitizeDigits((user as any).cpfCnpj) ||
+        sanitizeDigits((user as any).cpf) ||
+        '65929587000163';
+
+      const customerPayload: any = {
+        name: customerData?.fullName || user.name,
+        email: customerData?.email || user.email,
         cpfCnpj: customerCpfCnpj,
-        mobilePhone: customerMobilePhone,
       };
+
+      const mobilePhone = sanitizeDigits(
+        customerData?.whatsapp || (user as any).mobilePhone,
+      );
+      if (mobilePhone) {
+        customerPayload.mobilePhone = mobilePhone;
+      }
 
       this.logger.log(
         `[Asaas] Criando cliente: ${customerPayload.name} / ${customerPayload.email}`,
@@ -106,27 +115,35 @@ export class PaymentsService {
         body: JSON.stringify(customerPayload),
       });
 
-      const customerData = await customerRes.json();
+      const customerRaw = await customerRes.text();
+      let customerDataResponse: any = null;
+      try {
+        customerDataResponse = customerRaw ? JSON.parse(customerRaw) : null;
+      } catch {
+        customerDataResponse = { raw: customerRaw };
+      }
 
       if (!customerRes.ok) {
         this.logger.error(
-          `[Asaas] Erro ao criar cliente: ${JSON.stringify(customerData)}`,
+          `[Asaas] Erro ao criar cliente | status=${customerRes.status} | body=${JSON.stringify(customerDataResponse)}`,
         );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
         throw new InternalServerErrorException(
-          'Erro ao registrar cliente no provedor de pagamento.',
+          `Erro ao registrar cliente no Asaas: ${
+            customerDataResponse?.errors?.[0]?.description || 'resposta inválida do Asaas'
+          }`,
         );
       }
 
       this.logger.log(
-        `[Asaas] Cliente criado/recuperado com sucesso. ID: ${customerData.id}`,
+        `[Asaas] Cliente criado/recuperado com sucesso. ID: ${customerDataResponse?.id}`,
       );
 
       const paymentPayload = {
-        customer: customerData.id,
+        customer: customerDataResponse.id,
         billingType: 'PIX',
         value: totalAmount,
         dueDate: new Date().toISOString().split('T')[0],
@@ -145,17 +162,27 @@ export class PaymentsService {
         body: JSON.stringify(paymentPayload),
       });
 
-      const paymentData = await paymentRes.json();
+      const paymentRaw = await paymentRes.text();
+      let paymentData: any = null;
+      try {
+        paymentData = paymentRaw ? JSON.parse(paymentRaw) : null;
+      } catch {
+        paymentData = { raw: paymentRaw };
+      }
 
       if (!paymentRes.ok) {
         this.logger.error(
-          `[Asaas] Erro ao criar cobrança: ${JSON.stringify(paymentData)}`,
+          `[Asaas] Erro ao criar cobrança | status=${paymentRes.status} | body=${JSON.stringify(paymentData)}`,
         );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
-        throw new InternalServerErrorException('Erro ao gerar a cobrança PIX.');
+        throw new InternalServerErrorException(
+          `Erro ao gerar a cobrança PIX: ${
+            paymentData?.errors?.[0]?.description || 'resposta inválida do Asaas'
+          }`,
+        );
       }
 
       this.logger.log(`[Asaas] Cobrança criada. ID: ${paymentData.id}`);
@@ -166,18 +193,26 @@ export class PaymentsService {
         },
       });
 
-      const qrCodeData = await qrCodeRes.json();
+      const qrCodeRaw = await qrCodeRes.text();
+      let qrCodeData: any = null;
+      try {
+        qrCodeData = qrCodeRaw ? JSON.parse(qrCodeRaw) : null;
+      } catch {
+        qrCodeData = { raw: qrCodeRaw };
+      }
 
       if (!qrCodeRes.ok) {
         this.logger.error(
-          `[Asaas] Erro ao buscar QR Code: ${JSON.stringify(qrCodeData)}`,
+          `[Asaas] Erro ao buscar QR Code | status=${qrCodeRes.status} | body=${JSON.stringify(qrCodeData)}`,
         );
         await this.prisma.order.update({
           where: { id: order.id },
           data: { status: 'FAILED' },
         });
         throw new InternalServerErrorException(
-          'Erro ao gerar o QR Code do PIX.',
+          `Erro ao gerar o QR Code do PIX: ${
+            qrCodeData?.errors?.[0]?.description || 'resposta inválida do Asaas'
+          }`,
         );
       }
 
@@ -198,15 +233,12 @@ export class PaymentsService {
         orderNsu: order.orderNsu,
         paymentId: paymentData.id,
         invoiceUrl: paymentData.invoiceUrl,
-        pixPayload: qrCodeData.payload,
-        pixEncodedImage: qrCodeData.encodedImage,
-        expirationDate: qrCodeData.expirationDate,
+        pixPayload: qrCodeData?.payload,
+        pixEncodedImage: qrCodeData?.encodedImage,
+        expirationDate: qrCodeData?.expirationDate,
       };
     } catch (error: any) {
-      this.logger.error(
-        `[Asaas Checkout Error] ${error.message}`,
-        error.stack,
-      );
+      this.logger.error(`[Asaas Checkout Error] ${error.message}`, error.stack);
 
       if (
         error instanceof NotFoundException ||

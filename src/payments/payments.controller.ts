@@ -11,14 +11,21 @@ export class PaymentsController {
   @Post('create-checkout')
   @HttpCode(HttpStatus.OK)
   async createCheckout(
-    @Body() body: { raffleId: string; selectedTickets: number[] },
-    @CurrentUser() jwtUser: any
+    @Body()
+    body: {
+      raffleId: string;
+      selectedTickets: number[];
+      customerData?: {
+        fullName?: string;
+        email?: string;
+        whatsapp?: string;
+        tradeLink?: string;
+        cpfCnpj?: string;
+      };
+    },
+    @CurrentUser() jwtUser: any,
   ) {
-    return this.paymentsService.createInfinitePayCheckout(
-      jwtUser, 
-      body.raffleId, 
-      body.selectedTickets
-    );
+    return this.paymentsService.createAsaasCheckout(jwtUser, body);
   }
 
   @Get('check/:orderNsu')
