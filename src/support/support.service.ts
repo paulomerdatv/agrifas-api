@@ -6,11 +6,17 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { SupportTicketStatus, TicketMessageSender } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 interface CreateTicketInput {
   reason?: string;
   title?: string;
   message?: string;
+}
+
+interface CreatePublicTicketInput extends CreateTicketInput {
+  name?: string;
+  email?: string;
 }
 
 @Injectable()
@@ -22,30 +28,37 @@ export class SupportService {
     const title = this.requireText(input.title, 'Titulo');
     const message = this.requireText(input.message, 'Mensagem');
 
-    const ticket = await this.prisma.supportTicket.create({
-      data: {
-        userId,
-        reason,
-        title,
-        status: SupportTicketStatus.OPEN,
-        messages: {
-          create: {
-            sender: TicketMessageSender.USER,
-            message,
-          },
-        },
-      },
-      include: {
-        user: {
-          select: { id: true, name: true, email: true },
-        },
-        messages: {
-          orderBy: { createdAt: 'asc' },
-        },
-      },
+    return this.createTicketRecord(userId, reason, title, message);
+  }
+
+  async createPublicTicket(input: CreatePublicTicketInput) {
+    const name = this.requireText(input.name, 'Nome');
+    const email = this.requireEmail(input.email);
+    const reason = this.requireText(input.reason, 'Motivo');
+    const title = this.requireText(input.title, 'Titulo');
+    const message = this.requireText(input.message, 'Mensagem');
+
+    let user = await this.prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
     });
 
-    return ticket;
+    if (!user) {
+      const randomPassword = `SUP-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const passwordHash = await bcrypt.hash(randomPassword, 10);
+
+      user = await this.prisma.user.create({
+        data: {
+          name,
+          email,
+          passwordHash,
+          role: 'USER',
+        },
+        select: { id: true },
+      });
+    }
+
+    return this.createTicketRecord(user.id, reason, title, message);
   }
 
   async getMyTickets(userId: string) {
@@ -109,6 +122,50 @@ export class SupportService {
         },
       },
     });
+  }
+
+  private async createTicketRecord(
+    userId: string,
+    reason: string,
+    title: string,
+    message: string,
+  ) {
+    return this.prisma.supportTicket.create({
+      data: {
+        userId,
+        reason,
+        title,
+        status: SupportTicketStatus.OPEN,
+        messages: {
+          create: {
+            sender: TicketMessageSender.USER,
+            message,
+          },
+        },
+      },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true },
+        },
+        messages: {
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+  }
+
+  private requireEmail(value: string | undefined) {
+    const normalized = (value || '').trim().toLowerCase();
+    if (!normalized) {
+      throw new BadRequestException('Email e obrigatorio.');
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalized)) {
+      throw new BadRequestException('Email invalido.');
+    }
+
+    return normalized;
   }
 
   private requireText(value: string | undefined, label: string) {
