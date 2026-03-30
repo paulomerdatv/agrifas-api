@@ -26,58 +26,6 @@ import { Roles } from '../common/decorators/roles.decorator';
 export class AdminOperationsController {
   constructor(private readonly prisma: PrismaService) {}
 
-  @Get('orders')
-  async getOrders() {
-    return this.prisma.order.findMany({
-      include: {
-        raffle: {
-          select: {
-            id: true,
-            title: true,
-            image: true,
-            pricePerTicket: true,
-          },
-        },
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-  }
-
-  @Delete('orders/:id/customer-data')
-  async deleteOrderCustomerData(@Param('id') id: string) {
-    const order = await this.prisma.order.findUnique({
-      where: { id },
-      select: { id: true },
-    });
-
-    if (!order) {
-      throw new NotFoundException('Pedido nao encontrado.');
-    }
-
-    await this.prisma.order.update({
-      where: { id },
-      data: {
-        customerFullName: null,
-        customerEmail: null,
-        customerWhatsapp: null,
-        customerTradeLink: null,
-        customerCpfCnpj: null,
-      },
-    });
-
-    return {
-      success: true,
-      message: 'Dados do comprador removidos com sucesso.',
-    };
-  }
-
   @Get('support/tickets')
   async getAllSupportTickets() {
     return this.prisma.supportTicket.findMany({
