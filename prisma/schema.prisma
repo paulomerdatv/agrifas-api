@@ -40,23 +40,28 @@ enum TicketMessageSender {
   ADMIN
 }
 
+enum CouponType {
+  FIXED
+  PERCENTAGE
+}
+
 model User {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   name         String
-  email        String   @unique
+  email        String    @unique
   passwordHash String
-  steamId      String?  @unique
+  steamId      String?   @unique
   steamAvatar  String?
   provider     String?
-  isBlocked    Boolean  @default(false)
+  isBlocked    Boolean   @default(false)
   blockedAt    DateTime?
-  role         UserRole @default(USER)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  role         UserRole  @default(USER)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  orders       Order[]
+  orders         Order[]
   supportTickets SupportTicket[]
-  winners      Winner[]
+  winners        Winner[]
 }
 
 model Raffle {
@@ -72,37 +77,57 @@ model Raffle {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  orders         Order[]
-  winner         Winner?
+  orders Order[]
+  winner Winner?
 }
 
 model Order {
-  id                     String      @id @default(uuid())
-  userId                 String
-  user                   User        @relation(fields: [userId], references: [id])
-  raffleId               String
-  raffle                 Raffle      @relation(fields: [raffleId], references: [id])
-  
-  selectedTickets        Int[]
-  totalAmount            Float
-  status                 OrderStatus @default(PENDING)
-  
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id])
+  raffleId String
+  raffle   Raffle @relation(fields: [raffleId], references: [id])
+
+  selectedTickets Int[]
+  totalAmount     Float
+  status          OrderStatus @default(PENDING)
+
   // Campos de Integração
-  provider               String      @default("INFINITEPAY")
-  orderNsu               String      @unique
-  providerTransactionNsu String?     
-  receiptUrl             String?     
-  paymentMethod          String?     @default("PIX")
+  provider               String  @default("INFINITEPAY")
+  orderNsu               String  @unique
+  providerTransactionNsu String?
+  receiptUrl             String?
+  paymentMethod          String? @default("PIX")
   customerFullName       String?
   customerEmail          String?
   customerWhatsapp       String?
   customerTradeLink      String?
   customerCpfCnpj        String?
 
-  createdAt              DateTime    @default(now())
-  updatedAt              DateTime    @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  winner                 Winner?
+  winner               Winner?
+  couponId             String?
+  coupon               Coupon? @relation(fields: [couponId], references: [id])
+  couponCode           String?
+  couponDiscountAmount Float   @default(0)
+  subtotalAmount       Float?
+}
+
+model Coupon {
+  id         String     @id @default(uuid())
+  code       String     @unique
+  type       CouponType
+  value      Float
+  active     Boolean    @default(true)
+  usageLimit Int?
+  usedCount  Int        @default(0)
+  expiresAt  DateTime?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  orders Order[]
 }
 
 model SupportTicket {
@@ -116,7 +141,7 @@ model SupportTicket {
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
-  messages    SupportTicketMessage[]
+  messages SupportTicketMessage[]
 }
 
 model SupportTicketMessage {
@@ -129,14 +154,14 @@ model SupportTicketMessage {
 }
 
 model Winner {
-  id            String   @id @default(uuid())
-  raffleId      String   @unique
-  raffle        Raffle   @relation(fields: [raffleId], references: [id])
-  orderId       String   @unique
-  order         Order    @relation(fields: [orderId], references: [id])
-  userId        String
-  user          User     @relation(fields: [userId], references: [id])
-  ticketNumber  Int
-  drawnAt       DateTime @default(now())
+  id             String   @id @default(uuid())
+  raffleId       String   @unique
+  raffle         Raffle   @relation(fields: [raffleId], references: [id])
+  orderId        String   @unique
+  order          Order    @relation(fields: [orderId], references: [id])
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  ticketNumber   Int
+  drawnAt        DateTime @default(now())
   drawnByAdminId String?
 }

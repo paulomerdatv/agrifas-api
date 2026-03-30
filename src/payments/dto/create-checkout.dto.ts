@@ -1,4 +1,4 @@
-import { IsArray, IsString, ArrayNotEmpty, IsNumber } from 'class-validator';
+import { IsArray, IsString, ArrayNotEmpty, IsNumber, IsOptional } from 'class-validator';
 
 export class CreateAsaasCheckoutDto {
   @IsString()
@@ -8,4 +8,8 @@ export class CreateAsaasCheckoutDto {
   @ArrayNotEmpty()
   @IsNumber({}, { each: true })
   selectedTickets: number[];
+
+  @IsOptional()
+  @IsString()
+  couponCode?: string;
 }

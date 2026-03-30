@@ -15,6 +15,7 @@ export class PaymentsController {
     body: {
       raffleId: string;
       selectedTickets: number[];
+      couponCode?: string;
       customerData?: {
         fullName?: string;
         email?: string;
@@ -26,6 +27,20 @@ export class PaymentsController {
     @CurrentUser() jwtUser: any,
   ) {
     return this.paymentsService.createAsaasCheckout(jwtUser, body);
+  }
+
+  @Post('validate-coupon')
+  @HttpCode(HttpStatus.OK)
+  async validateCoupon(
+    @Body()
+    body: {
+      raffleId: string;
+      selectedTickets: number[];
+      couponCode: string;
+    },
+    @CurrentUser() jwtUser: any,
+  ) {
+    return this.paymentsService.validateCouponForCheckout(jwtUser, body);
   }
 
   @Get('check/:orderNsu')
