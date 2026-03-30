@@ -6,6 +6,7 @@ import { RafflesModule } from './raffles/raffles.module';
 import { AdminModule } from './admin/admin.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
+import { SupportModule } from './support/support.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { PaymentsModule } from './payments/payments.module';
     AdminModule,
     OrdersModule,
     PaymentsModule, // WebhooksModule removido, tudo concentrado aqui
+    SupportModule,
   ],
 })
 export class AppModule {}
