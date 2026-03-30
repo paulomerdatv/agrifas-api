@@ -54,6 +54,10 @@ export class AuthService {
       throw new UnauthorizedException('Credenciais invalidas.');
     }
 
+    if (user.isBlocked) {
+      throw new UnauthorizedException('Conta bloqueada. Entre em contato com o suporte.');
+    }
+
     if (!user.passwordHash) {
       throw new UnauthorizedException(
         'Esta conta usa login social. Utilize o login com Steam.',
@@ -94,6 +98,12 @@ export class AuthService {
       });
 
       if (existingUserBySteamEmail && !existingUserBySteamEmail.steamId) {
+        if (existingUserBySteamEmail.isBlocked) {
+          throw new UnauthorizedException(
+            'Conta bloqueada. Entre em contato com o suporte.',
+          );
+        }
+
         user = await this.prisma.user.update({
           where: { id: existingUserBySteamEmail.id },
           data: {
@@ -119,6 +129,12 @@ export class AuthService {
         });
       }
     } else {
+      if (user.isBlocked) {
+        throw new UnauthorizedException(
+          'Conta bloqueada. Entre em contato com o suporte.',
+        );
+      }
+
       user = await this.prisma.user.update({
         where: { id: user.id },
         data: {
@@ -161,6 +177,7 @@ export class AuthService {
         steamId: user.steamId || null,
         steamAvatar: user.steamAvatar || null,
         provider: user.provider || null,
+        isBlocked: user.isBlocked || false,
       },
     };
   }

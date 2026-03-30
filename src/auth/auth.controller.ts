@@ -73,6 +73,8 @@ export class AuthController {
         steamId: true,
         steamAvatar: true,
         provider: true,
+        isBlocked: true,
+        blockedAt: true,
         createdAt: true,
       },
     });

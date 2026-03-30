@@ -16,7 +16,12 @@ export class UsersController {
         id: true, 
         name: true, 
         email: true, 
+        steamId: true,
+        steamAvatar: true,
+        provider: true,
         role: true, 
+        isBlocked: true,
+        blockedAt: true,
         createdAt: true, 
         updatedAt: true 
       }

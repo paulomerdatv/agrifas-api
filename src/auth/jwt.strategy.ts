@@ -1,10 +1,11 @@
-import { ExtractJwt, Strategy } from 'passport-jwt';
+﻿import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor() {
+  constructor(private readonly prisma: PrismaService) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
@@ -13,10 +14,28 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    return { 
-      userId: payload.sub, 
-      email: payload.email, 
-      role: payload.role 
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        isBlocked: true,
+      },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Usuario nao encontrado.');
+    }
+
+    if (user.isBlocked) {
+      throw new UnauthorizedException('Conta bloqueada.');
+    }
+
+    return {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
     };
   }
 }
