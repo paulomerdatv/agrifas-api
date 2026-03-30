@@ -234,4 +234,96 @@ export class AdminController {
       affectedOrders: orderIdsToCancel.length,
     };
   }
+
+  @Post(':id/draw-winner')
+  async drawWinner(
+    @Param('id') raffleId: string,
+    @CurrentUser() adminUser: any,
+  ) {
+    const raffle = await this.prisma.raffle.findUnique({
+      where: { id: raffleId },
+      include: {
+        winner: {
+          select: { id: true },
+        },
+        orders: {
+          where: { status: 'PAID' },
+          select: {
+            id: true,
+            userId: true,
+            selectedTickets: true,
+          },
+        },
+      },
+    });
+
+    if (!raffle) {
+      throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    if (raffle.winner) {
+      throw new BadRequestException('Esta rifa ja possui vencedor.');
+    }
+
+    const ticketPool = raffle.orders.flatMap((order) =>
+      order.selectedTickets.map((ticketNumber) => ({
+        ticketNumber,
+        orderId: order.id,
+        userId: order.userId,
+      })),
+    );
+
+    if (!ticketPool.length) {
+      throw new BadRequestException('Nao ha cotas pagas para sortear.');
+    }
+
+    const drawnIndex = Math.floor(Math.random() * ticketPool.length);
+    const drawnTicket = ticketPool[drawnIndex];
+
+    const winner = await this.prisma.$transaction(async (tx) => {
+      const createdWinner = await tx.winner.create({
+        data: {
+          raffleId,
+          orderId: drawnTicket.orderId,
+          userId: drawnTicket.userId,
+          ticketNumber: drawnTicket.ticketNumber,
+          drawnByAdminId: adminUser?.userId,
+        },
+      });
+
+      await tx.raffle.update({
+        where: { id: raffleId },
+        data: { status: RaffleStatus.ENDED },
+      });
+
+      return createdWinner;
+    });
+
+    return this.prisma.winner.findUnique({
+      where: { id: winner.id },
+      include: {
+        raffle: {
+          select: {
+            id: true,
+            title: true,
+            image: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        order: {
+          select: {
+            id: true,
+            orderNsu: true,
+            selectedTickets: true,
+          },
+        },
+      },
+    });
+  }
 }

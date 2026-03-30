@@ -53,6 +53,14 @@ export class PaymentsService {
         );
       }
 
+      const sanitizeDigits = (value?: string) => (value || '').replace(/\D/g, '');
+      const sanitizeText = (value?: string) => (value || '').trim();
+      const customerCpfCnpj =
+        sanitizeDigits(customerData?.cpfCnpj) ||
+        sanitizeDigits((user as any).cpfCnpj) ||
+        sanitizeDigits((user as any).cpf) ||
+        '65929587000163';
+
       const totalAmount = selectedTickets.length * raffle.pricePerTicket;
       const orderNsu = `AG-${Date.now()}-${Math.random()
         .toString(36)
@@ -68,6 +76,11 @@ export class PaymentsService {
           status: 'PENDING',
           provider: 'ASAAS',
           orderNsu,
+          customerFullName: sanitizeText(customerData?.fullName) || sanitizeText(user.name),
+          customerEmail: sanitizeText(customerData?.email) || sanitizeText(user.email),
+          customerWhatsapp: sanitizeText(customerData?.whatsapp) || null,
+          customerTradeLink: sanitizeText(customerData?.tradeLink) || null,
+          customerCpfCnpj: customerCpfCnpj || null,
         },
       });
 
@@ -81,15 +94,6 @@ export class PaymentsService {
           'Configuração de pagamento ausente no servidor.',
         );
       }
-
-      const sanitizeDigits = (value?: string) => (value || '').replace(/\D/g, '');
-      const sanitizeText = (value?: string) => (value || '').trim();
-
-      const customerCpfCnpj =
-        sanitizeDigits(customerData?.cpfCnpj) ||
-        sanitizeDigits((user as any).cpfCnpj) ||
-        sanitizeDigits((user as any).cpf) ||
-        '65929587000163';
 
       const customerPayload: any = {
         name: sanitizeText(customerData?.fullName) || sanitizeText(user.name),

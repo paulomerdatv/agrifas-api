@@ -1,37 +1,41 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { SupportService } from './support.service';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
-@Controller('support/live')
+@UseGuards(JwtAuthGuard)
+@Controller('support/tickets')
 export class SupportController {
   constructor(private readonly supportService: SupportService) {}
 
-  @Get('status')
-  getStatus() {
-    return this.supportService.getLiveStatus();
-  }
-
-  @Post('session')
-  createSession(
+  @Post()
+  createTicket(
     @Body()
     body: {
-      userId?: string;
-      name?: string;
-      email?: string;
+      reason?: string;
+      title?: string;
+      message?: string;
     },
+    @CurrentUser() user: any,
   ) {
-    return this.supportService.createSession(body || {});
+    return this.supportService.createTicket(user.userId, body || {});
   }
 
-  @Get(':sessionId/messages')
-  getMessages(@Param('sessionId') sessionId: string) {
-    return this.supportService.listMessages(sessionId);
+  @Get('me')
+  getMyTickets(@CurrentUser() user: any) {
+    return this.supportService.getMyTickets(user.userId);
   }
 
-  @Post(':sessionId/messages')
-  sendMessage(
-    @Param('sessionId') sessionId: string,
+  @Post(':id/messages')
+  addTicketMessage(
+    @Param('id') ticketId: string,
     @Body() body: { message?: string },
+    @CurrentUser() user: any,
   ) {
-    return this.supportService.sendUserMessage(sessionId, body?.message || '');
+    return this.supportService.addUserMessage(
+      user.userId,
+      ticketId,
+      body?.message,
+    );
   }
 }
