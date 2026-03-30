@@ -25,6 +25,11 @@ export class AdminOrdersController {
     return this.adminOrdersService.getOrderMetrics();
   }
 
+  @Get('dashboard-metrics')
+  async getDashboardMetrics() {
+    return this.adminOrdersService.getDashboardMetrics();
+  }
+
   @Get()
   async listOrders(
     @Query('status') status?: string,

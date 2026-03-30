@@ -106,6 +106,210 @@ export class AdminOrdersService {
     };
   }
 
+  async getDashboardMetrics() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+    const sevenDaysAgo = new Date(todayStart);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
+    const revenueSeriesStart = new Date(todayStart);
+    revenueSeriesStart.setDate(revenueSeriesStart.getDate() - 13);
+
+    const [
+      paidAgg,
+      revenueTodayAgg,
+      paidOrdersToday,
+      pendingOrders,
+      activeRaffles,
+      endedRaffles,
+      newUsersLast7Days,
+      paidOrdersCount,
+      totalOrdersCount,
+      pendingStatusCount,
+      paidStatusCount,
+      failedStatusCount,
+      cancelledStatusCount,
+      expiredStatusCount,
+      waitingPaymentCount,
+      paidOrdersForTopRaffles,
+      paidOrdersForSeries,
+    ] = await this.prisma.$transaction([
+      this.prisma.order.aggregate({
+        where: { status: OrderStatus.PAID },
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          status: OrderStatus.PAID,
+          updatedAt: {
+            gte: todayStart,
+            lt: tomorrowStart,
+          },
+        },
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.order.count({
+        where: {
+          status: OrderStatus.PAID,
+          updatedAt: {
+            gte: todayStart,
+            lt: tomorrowStart,
+          },
+        },
+      }),
+      this.prisma.order.count({
+        where: { status: OrderStatus.PENDING },
+      }),
+      this.prisma.raffle.count({
+        where: { status: 'ACTIVE' },
+      }),
+      this.prisma.raffle.count({
+        where: { status: 'ENDED' },
+      }),
+      this.prisma.user.count({
+        where: {
+          createdAt: {
+            gte: sevenDaysAgo,
+            lt: tomorrowStart,
+          },
+        },
+      }),
+      this.prisma.order.count({
+        where: { status: OrderStatus.PAID },
+      }),
+      this.prisma.order.count(),
+      this.prisma.order.count({ where: { status: OrderStatus.PENDING } }),
+      this.prisma.order.count({ where: { status: OrderStatus.PAID } }),
+      this.prisma.order.count({ where: { status: OrderStatus.FAILED } }),
+      this.prisma.order.count({ where: { status: OrderStatus.CANCELLED } }),
+      this.prisma.order.count({ where: { status: OrderStatus.EXPIRED } }),
+      this.prisma.order.count({
+        where: {
+          status: OrderStatus.PENDING,
+          provider: 'ASAAS',
+        },
+      }),
+      this.prisma.order.findMany({
+        where: {
+          status: OrderStatus.PAID,
+        },
+        select: {
+          raffleId: true,
+          totalAmount: true,
+        },
+      }),
+      this.prisma.order.findMany({
+        where: {
+          status: OrderStatus.PAID,
+          updatedAt: {
+            gte: revenueSeriesStart,
+            lt: tomorrowStart,
+          },
+        },
+        select: {
+          updatedAt: true,
+          totalAmount: true,
+        },
+      }),
+    ]);
+
+    const totalRevenue = paidAgg._sum.totalAmount || 0;
+    const revenueToday = revenueTodayAgg._sum.totalAmount || 0;
+    const averageTicket =
+      paidOrdersCount > 0 ? Number((totalRevenue / paidOrdersCount).toFixed(2)) : 0;
+    const conversionRate =
+      totalOrdersCount > 0
+        ? Number(((paidOrdersCount / totalOrdersCount) * 100).toFixed(2))
+        : 0;
+
+    const pendingWithoutWaitingPayment = Math.max(
+      0,
+      pendingStatusCount - waitingPaymentCount,
+    );
+
+    const ordersByStatus = [
+      { status: 'WAITING_PAYMENT', count: waitingPaymentCount },
+      { status: 'PENDING', count: pendingWithoutWaitingPayment },
+      { status: 'PAID', count: paidStatusCount },
+      { status: 'FAILED', count: failedStatusCount },
+      { status: 'CANCELLED', count: cancelledStatusCount },
+      { status: 'EXPIRED', count: expiredStatusCount },
+    ];
+
+    const revenueByDayMap = new Map<string, number>();
+    for (let i = 0; i < 14; i += 1) {
+      const date = new Date(revenueSeriesStart);
+      date.setDate(revenueSeriesStart.getDate() + i);
+      revenueByDayMap.set(this.toDateKey(date), 0);
+    }
+
+    for (const order of paidOrdersForSeries) {
+      const key = this.toDateKey(order.updatedAt);
+      const current = revenueByDayMap.get(key) || 0;
+      revenueByDayMap.set(key, Number((current + order.totalAmount).toFixed(2)));
+    }
+
+    const revenueByDay = Array.from(revenueByDayMap.entries()).map(
+      ([date, amount]) => ({
+        date,
+        amount,
+      }),
+    );
+
+    const revenueByRaffle = new Map<string, number>();
+    for (const order of paidOrdersForTopRaffles) {
+      const current = revenueByRaffle.get(order.raffleId) || 0;
+      revenueByRaffle.set(
+        order.raffleId,
+        Number((current + order.totalAmount).toFixed(2)),
+      );
+    }
+
+    const topRafflesRaw = Array.from(revenueByRaffle.entries())
+      .map(([raffleId, revenue]) => ({
+        raffleId,
+        revenue,
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 7);
+
+    const topRaffleIds = topRafflesRaw.map((item) => item.raffleId);
+    const topRafflesData = topRaffleIds.length
+      ? await this.prisma.raffle.findMany({
+          where: { id: { in: topRaffleIds } },
+          select: { id: true, title: true },
+        })
+      : [];
+
+    const raffleTitleById = new Map(topRafflesData.map((item) => [item.id, item.title]));
+    const topRafflesByRevenue = topRafflesRaw.map((item) => ({
+      raffleId: item.raffleId,
+      title: raffleTitleById.get(item.raffleId) || `Rifa ${item.raffleId}`,
+      revenue: item.revenue || 0,
+    }));
+
+    return {
+      totalRevenue,
+      revenueToday,
+      paidOrdersToday,
+      pendingOrders,
+      activeRaffles,
+      endedRaffles,
+      averageTicket,
+      newUsersLast7Days,
+      conversionRate,
+      totalOrders: totalOrdersCount,
+      paidOrders: paidOrdersCount,
+      revenueByDay,
+      ordersByStatus,
+      topRafflesByRevenue,
+    };
+  }
+
   async getOrderById(orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -349,6 +553,13 @@ export class AdminOrdersService {
     if (value === OrderStatus.CANCELLED) return OrderStatus.CANCELLED;
     if (value === OrderStatus.EXPIRED) return OrderStatus.EXPIRED;
     return null;
+  }
+
+  private toDateKey(date: Date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   private toOrderSummary(order: any) {
