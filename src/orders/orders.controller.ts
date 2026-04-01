@@ -17,7 +17,17 @@ export class OrdersController {
 
   @Post()
   async createOrder(
-    @Body() body: { raffleId: string; selectedTickets: number[] },
+    @Body()
+    body: {
+      raffleId: string;
+      selectedTickets: number[];
+      origin?: {
+        ref?: string;
+        utm_source?: string;
+        utm_medium?: string;
+        utm_campaign?: string;
+      };
+    },
     @CurrentUser() user: any,
   ) {
     const { raffleId, selectedTickets } = body;
@@ -31,6 +41,7 @@ export class OrdersController {
     }
 
     const totalAmount = selectedTickets.length * raffle.pricePerTicket;
+    const trackingOrigin = this.resolveTrackingOrigin(body.origin);
 
     return this.prisma.order.create({
       data: {
@@ -46,6 +57,10 @@ export class OrdersController {
         provider: 'INFINITEPAY',
         orderNsu: `AGRIFAS-${Date.now()}`,
         paymentMethod: 'PIX',
+        refCode: trackingOrigin.refCode,
+        utmSource: trackingOrigin.utmSource,
+        utmMedium: trackingOrigin.utmMedium,
+        utmCampaign: trackingOrigin.utmCampaign,
       },
     });
   }
@@ -65,5 +80,26 @@ export class OrdersController {
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  private resolveTrackingOrigin(origin?: {
+    ref?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+  }) {
+    return {
+      refCode: this.normalizeOriginValue(origin?.ref),
+      utmSource: this.normalizeOriginValue(origin?.utm_source),
+      utmMedium: this.normalizeOriginValue(origin?.utm_medium),
+      utmCampaign: this.normalizeOriginValue(origin?.utm_campaign),
+    };
+  }
+
+  private normalizeOriginValue(raw?: string) {
+    if (!raw) return null;
+    const value = String(raw).trim();
+    if (!value) return null;
+    return value.slice(0, 120);
   }
 }

@@ -24,6 +24,20 @@ interface CouponPreviewResult {
   totalAmount: number;
 }
 
+interface TrackingOriginInput {
+  ref?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+}
+
+interface TrackingOriginData {
+  refCode: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+}
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -31,7 +45,7 @@ export class PaymentsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createAsaasCheckout(jwtUser: any, dto: any) {
-    const { raffleId, selectedTickets, customerData, couponCode } = dto;
+    const { raffleId, selectedTickets, customerData, couponCode, origin } = dto;
 
     let order: any = null;
     let appliedCoupon: CouponPreviewResult | null = null;
@@ -45,6 +59,8 @@ export class PaymentsService {
         where: { id: jwtUser.userId },
       });
       if (!user) throw new NotFoundException('Usuario nao encontrado.');
+
+      const trackingOrigin = this.resolveTrackingOrigin(origin, user);
 
       const raffle = await this.prisma.raffle.findUnique({
         where: { id: raffleId },
@@ -148,6 +164,10 @@ export class PaymentsService {
             customerWhatsapp: sanitizeText(customerData?.whatsapp) || null,
             customerTradeLink: sanitizeText(customerData?.tradeLink) || null,
             customerCpfCnpj: customerCpfCnpj || null,
+            refCode: trackingOrigin.refCode,
+            utmSource: trackingOrigin.utmSource,
+            utmMedium: trackingOrigin.utmMedium,
+            utmCampaign: trackingOrigin.utmCampaign,
           },
         });
       });
@@ -454,6 +474,10 @@ export class PaymentsService {
         subtotalAmount: true,
         couponCode: true,
         couponDiscountAmount: true,
+        refCode: true,
+        utmSource: true,
+        utmMedium: true,
+        utmCampaign: true,
         providerTransactionNsu: true,
       },
     });
@@ -554,6 +578,44 @@ export class PaymentsService {
     return String(raw || '').trim().toUpperCase();
   }
 
+  private resolveTrackingOrigin(
+    origin: TrackingOriginInput | undefined,
+    user: {
+      refCode?: string | null;
+      utmSource?: string | null;
+      utmMedium?: string | null;
+      utmCampaign?: string | null;
+    },
+  ): TrackingOriginData {
+    const normalizedFromRequest = this.normalizeTrackingOrigin(origin);
+    return {
+      refCode: normalizedFromRequest.refCode || this.normalizeOriginValue(user.refCode),
+      utmSource:
+        normalizedFromRequest.utmSource || this.normalizeOriginValue(user.utmSource),
+      utmMedium:
+        normalizedFromRequest.utmMedium || this.normalizeOriginValue(user.utmMedium),
+      utmCampaign:
+        normalizedFromRequest.utmCampaign ||
+        this.normalizeOriginValue(user.utmCampaign),
+    };
+  }
+
+  private normalizeTrackingOrigin(origin?: TrackingOriginInput): TrackingOriginData {
+    return {
+      refCode: this.normalizeOriginValue(origin?.ref),
+      utmSource: this.normalizeOriginValue(origin?.utm_source),
+      utmMedium: this.normalizeOriginValue(origin?.utm_medium),
+      utmCampaign: this.normalizeOriginValue(origin?.utm_campaign),
+    };
+  }
+
+  private normalizeOriginValue(raw?: string | null) {
+    if (!raw) return null;
+    const value = String(raw).trim();
+    if (!value) return null;
+    return value.slice(0, 120);
+  }
+
   private async releaseCouponReservation(
     orderId: string,
     couponId: string,
@@ -586,4 +648,3 @@ export class PaymentsService {
       .catch(() => null);
   }
 }
-

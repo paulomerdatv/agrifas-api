@@ -53,6 +53,10 @@ model User {
   steamId      String?   @unique
   steamAvatar  String?
   provider     String?
+  refCode      String?
+  utmSource    String?
+  utmMedium    String?
+  utmCampaign  String?
   isBlocked    Boolean   @default(false)
   blockedAt    DateTime?
   role         UserRole  @default(USER)
@@ -103,6 +107,10 @@ model Order {
   customerWhatsapp       String?
   customerTradeLink      String?
   customerCpfCnpj        String?
+  refCode                String?
+  utmSource              String?
+  utmMedium              String?
+  utmCampaign            String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

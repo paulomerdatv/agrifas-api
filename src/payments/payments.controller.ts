@@ -16,6 +16,12 @@ export class PaymentsController {
       raffleId: string;
       selectedTickets: number[];
       couponCode?: string;
+      origin?: {
+        ref?: string;
+        utm_source?: string;
+        utm_medium?: string;
+        utm_campaign?: string;
+      };
       customerData?: {
         fullName?: string;
         email?: string;

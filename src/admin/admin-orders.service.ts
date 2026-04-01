@@ -13,6 +13,20 @@ interface ListOrdersInput {
   search?: string;
 }
 
+interface OriginGroupRow {
+  refCode: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+}
+
+export interface OriginPerformanceRow extends OriginGroupRow {
+  sourceKey: string;
+  signups: number;
+  orders: number;
+  revenue: number;
+}
+
 @Injectable()
 export class AdminOrdersService {
   constructor(private readonly prisma: PrismaService) {}
@@ -137,6 +151,9 @@ export class AdminOrdersService {
       waitingPaymentCount,
       paidOrdersForTopRaffles,
       paidOrdersForSeries,
+      userOriginsGrouped,
+      orderOriginsGrouped,
+      paidRevenueByOriginGrouped,
     ] = await this.prisma.$transaction([
       this.prisma.order.aggregate({
         where: { status: OrderStatus.PAID },
@@ -212,6 +229,32 @@ export class AdminOrdersService {
         },
         select: {
           updatedAt: true,
+          totalAmount: true,
+        },
+      }),
+      this.prisma.user.findMany({
+        select: {
+          refCode: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
+        },
+      }),
+      this.prisma.order.findMany({
+        select: {
+          refCode: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
+        },
+      }),
+      this.prisma.order.findMany({
+        where: { status: OrderStatus.PAID },
+        select: {
+          refCode: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
           totalAmount: true,
         },
       }),
@@ -292,6 +335,12 @@ export class AdminOrdersService {
       revenue: item.revenue || 0,
     }));
 
+    const originPerformance = this.buildOriginPerformance({
+      userOriginsGrouped,
+      orderOriginsGrouped,
+      paidRevenueByOriginGrouped,
+    });
+
     return {
       totalRevenue,
       revenueToday,
@@ -307,6 +356,7 @@ export class AdminOrdersService {
       revenueByDay,
       ordersByStatus,
       topRafflesByRevenue,
+      originPerformance,
     };
   }
 
@@ -506,6 +556,86 @@ export class AdminOrdersService {
     };
   }
 
+  private buildOriginPerformance(input: {
+    userOriginsGrouped: OriginGroupRow[];
+    orderOriginsGrouped: OriginGroupRow[];
+    paidRevenueByOriginGrouped: Array<OriginGroupRow & { totalAmount: number }>;
+  }) {
+    const map = new Map<string, OriginPerformanceRow>();
+
+    const touch = (row: OriginGroupRow) => {
+      const normalized = this.normalizeOriginRow(row);
+      const sourceKey = this.buildOriginKey(normalized);
+      const current = map.get(sourceKey);
+
+      if (current) {
+        return current;
+      }
+
+      const created: OriginPerformanceRow = {
+        sourceKey,
+        refCode: normalized.refCode,
+        utmSource: normalized.utmSource,
+        utmMedium: normalized.utmMedium,
+        utmCampaign: normalized.utmCampaign,
+        signups: 0,
+        orders: 0,
+        revenue: 0,
+      };
+      map.set(sourceKey, created);
+      return created;
+    };
+
+    for (const row of input.userOriginsGrouped) {
+      const target = touch(row);
+      target.signups += 1;
+    }
+
+    for (const row of input.orderOriginsGrouped) {
+      const target = touch(row);
+      target.orders += 1;
+    }
+
+    for (const row of input.paidRevenueByOriginGrouped) {
+      const target = touch(row);
+      target.revenue = Number(
+        (target.revenue + Number(row.totalAmount || 0)).toFixed(2),
+      );
+    }
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+      if (b.orders !== a.orders) return b.orders - a.orders;
+      if (b.signups !== a.signups) return b.signups - a.signups;
+      return a.sourceKey.localeCompare(b.sourceKey);
+    });
+  }
+
+  private normalizeOriginRow(row: OriginGroupRow): OriginGroupRow {
+    return {
+      refCode: this.normalizeOriginValue(row.refCode),
+      utmSource: this.normalizeOriginValue(row.utmSource),
+      utmMedium: this.normalizeOriginValue(row.utmMedium),
+      utmCampaign: this.normalizeOriginValue(row.utmCampaign),
+    };
+  }
+
+  private buildOriginKey(row: OriginGroupRow) {
+    const parts: string[] = [];
+    if (row.refCode) parts.push(`ref=${row.refCode}`);
+    if (row.utmSource) parts.push(`utm_source=${row.utmSource}`);
+    if (row.utmMedium) parts.push(`utm_medium=${row.utmMedium}`);
+    if (row.utmCampaign) parts.push(`utm_campaign=${row.utmCampaign}`);
+    return parts.length ? parts.join('|') : 'DIRECT';
+  }
+
+  private normalizeOriginValue(raw?: string | null) {
+    if (!raw) return null;
+    const value = String(raw).trim();
+    if (!value) return null;
+    return value.slice(0, 120);
+  }
+
   private normalizePage(page?: number) {
     if (!page || Number.isNaN(page)) return 1;
     return Math.max(1, Math.floor(page));
@@ -586,6 +716,10 @@ export class AdminOrdersService {
       customerWhatsapp: order.customerWhatsapp,
       customerTradeLink: order.customerTradeLink,
       customerCpfCnpj: order.customerCpfCnpj,
+      refCode: order.refCode || null,
+      utmSource: order.utmSource || null,
+      utmMedium: order.utmMedium || null,
+      utmCampaign: order.utmCampaign || null,
       raffle: order.raffle,
       user: order.user,
     };

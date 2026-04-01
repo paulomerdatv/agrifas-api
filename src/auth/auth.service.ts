@@ -16,6 +16,13 @@ interface SteamOpenIdProfileInput {
   avatarfull?: string;
 }
 
+interface TrackingOriginData {
+  refCode: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -33,12 +40,17 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 10);
+    const trackingOrigin = this.normalizeTrackingOrigin(dto);
     const user = await this.prisma.user.create({
       data: {
         name: dto.name,
         email: dto.email.toLowerCase(),
         passwordHash,
         provider: 'LOCAL',
+        refCode: trackingOrigin.refCode,
+        utmSource: trackingOrigin.utmSource,
+        utmMedium: trackingOrigin.utmMedium,
+        utmCampaign: trackingOrigin.utmCampaign,
       },
     });
 
@@ -180,5 +192,26 @@ export class AuthService {
         isBlocked: user.isBlocked || false,
       },
     };
+  }
+
+  private normalizeTrackingOrigin(input: {
+    ref?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+  }): TrackingOriginData {
+    return {
+      refCode: this.normalizeOriginValue(input?.ref),
+      utmSource: this.normalizeOriginValue(input?.utm_source),
+      utmMedium: this.normalizeOriginValue(input?.utm_medium),
+      utmCampaign: this.normalizeOriginValue(input?.utm_campaign),
+    };
+  }
+
+  private normalizeOriginValue(raw?: string) {
+    if (!raw) return null;
+    const value = String(raw).trim();
+    if (!value) return null;
+    return value.slice(0, 120);
   }
 }
