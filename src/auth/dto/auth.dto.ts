@@ -39,3 +39,26 @@ export class LoginDto {
   @IsString()
   password: string;
 }
+
+export class ForgotPasswordDto {
+  @IsEmail({}, { message: 'O e-mail deve ser valido.' })
+  email: string;
+
+  @IsString()
+  @MinLength(6, { message: 'A nova senha deve ter no minimo 6 caracteres.' })
+  newPassword: string;
+
+  @IsString()
+  @MinLength(6, { message: 'A confirmacao da senha deve ter no minimo 6 caracteres.' })
+  confirmPassword: string;
+}
+
+export class ChangePasswordDto {
+  @IsString()
+  @MinLength(6, { message: 'A nova senha deve ter no minimo 6 caracteres.' })
+  newPassword: string;
+
+  @IsString()
+  @MinLength(6, { message: 'A confirmacao da senha deve ter no minimo 6 caracteres.' })
+  confirmPassword: string;
+}

@@ -9,7 +9,12 @@
 } from '@nestjs/common';
 import { Response } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto } from './dto/auth.dto';
+import {
+  RegisterDto,
+  LoginDto,
+  ForgotPasswordDto,
+  ChangePasswordDto,
+} from './dto/auth.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -30,6 +35,17 @@ export class AuthController {
   @Post('login')
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @Post('forgot-password')
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('change-password')
+  changePassword(@CurrentUser() user: any, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(user.userId, dto);
   }
 
   @UseGuards(SteamAuthGuard)
@@ -73,6 +89,9 @@ export class AuthController {
         steamId: true,
         steamAvatar: true,
         provider: true,
+        twoFactorEnabled: true,
+        twoFactorMethod: true,
+        twoFactorEmailVerifiedAt: true,
         isBlocked: true,
         blockedAt: true,
         createdAt: true,
