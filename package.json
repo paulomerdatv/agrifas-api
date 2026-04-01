@@ -7,7 +7,8 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
-    "prisma:seed": "ts-node prisma/seed.ts"
+    "prisma:seed": "ts-node prisma/seed.ts",
+    "railway:predeploy": "node scripts/railway-predeploy.cjs"
   },
   "dependencies": {
     "@nestjs/common": "^10.0.0",
