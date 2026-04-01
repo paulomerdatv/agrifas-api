@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { CouponType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 
 interface CouponPreviewResult {
   coupon: {
@@ -42,7 +43,10 @@ interface TrackingOriginData {
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discordLogsService: DiscordLogsService,
+  ) {}
 
   async createAsaasCheckout(jwtUser: any, dto: any) {
     const { raffleId, selectedTickets, customerData, couponCode, origin } = dto;
@@ -170,6 +174,19 @@ export class PaymentsService {
             utmCampaign: trackingOrigin.utmCampaign,
           },
         });
+      });
+
+      void this.discordLogsService.sendPaymentLog({
+        title: 'Pedido PIX criado',
+        description: 'Pedido criado para checkout PIX.',
+        fields: [
+          { name: 'orderId', value: order.id, inline: true },
+          { name: 'orderNsu', value: order.orderNsu, inline: true },
+          { name: 'userId', value: user.id, inline: true },
+          { name: 'raffleId', value: raffleId, inline: true },
+          { name: 'subtotal', value: subtotalAmount, inline: true },
+          { name: 'total', value: totalAmount, inline: true },
+        ],
       });
 
       const apiKey = process.env.ASAAS_API_KEY;
@@ -351,6 +368,18 @@ export class PaymentsService {
         },
       });
 
+      void this.discordLogsService.sendPaymentLog({
+        title: 'Checkout PIX gerado',
+        description: 'Checkout PIX criado com sucesso no provedor.',
+        fields: [
+          { name: 'orderId', value: order.id, inline: true },
+          { name: 'orderNsu', value: order.orderNsu, inline: true },
+          { name: 'paymentId', value: paymentData.id, inline: true },
+          { name: 'status', value: 'PENDING', inline: true },
+          { name: 'total', value: totalAmount, inline: true },
+        ],
+      });
+
       return {
         orderId: order.id,
         orderNsu: order.orderNsu,
@@ -393,6 +422,18 @@ export class PaymentsService {
         `[Asaas Checkout Error] ${error.message}`,
         error.stack,
       );
+
+      void this.discordLogsService.sendPaymentLog({
+        title: 'Falha no checkout PIX',
+        description: 'Erro ao gerar checkout PIX.',
+        fields: [
+          { name: 'orderId', value: order?.id || '-', inline: true },
+          { name: 'orderNsu', value: order?.orderNsu || '-', inline: true },
+          { name: 'raffleId', value: raffleId || '-', inline: true },
+          { name: 'userId', value: jwtUser?.userId || '-', inline: true },
+          { name: 'erro', value: error?.message || 'erro_desconhecido' },
+        ],
+      });
 
       if (
         error instanceof NotFoundException ||

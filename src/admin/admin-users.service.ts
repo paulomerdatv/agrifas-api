@@ -4,6 +4,7 @@
   NotFoundException,
 } from '@nestjs/common';
 import { OrderStatus, Prisma, UserRole } from '@prisma/client';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface ListUsersInput {
@@ -14,7 +15,10 @@ interface ListUsersInput {
 
 @Injectable()
 export class AdminUsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discordLogsService: DiscordLogsService,
+  ) {}
 
   async listUsers(input: ListUsersInput) {
     const page = this.normalizePage(input.page);
@@ -144,6 +148,16 @@ export class AdminUsersService {
       data: { role: UserRole.ADMIN },
     });
 
+    void this.discordLogsService.sendAdminLog({
+      title: 'Usuario promovido para ADMIN',
+      description: 'Permissao elevada no painel admin.',
+      fields: [
+        { name: 'targetUserId', value: targetUserId, inline: true },
+        { name: 'action', value: 'PROMOTE_ADMIN', inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
     return {
       success: true,
       message: `Usuario promovido para ADMIN por ${adminUserId || 'admin'}.`,
@@ -179,6 +193,16 @@ export class AdminUsersService {
       data: { role: UserRole.USER },
     });
 
+    void this.discordLogsService.sendAdminLog({
+      title: 'Permissao ADMIN removida',
+      description: 'Usuario voltou ao perfil USER no painel admin.',
+      fields: [
+        { name: 'targetUserId', value: targetUserId, inline: true },
+        { name: 'action', value: 'REMOVE_ADMIN', inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
     return {
       success: true,
       message: `Permissao ADMIN removida por ${adminUserId || 'admin'}.`,
@@ -209,6 +233,16 @@ export class AdminUsersService {
       },
     });
 
+    void this.discordLogsService.sendAdminLog({
+      title: 'Usuario bloqueado',
+      description: 'Conta bloqueada no painel admin.',
+      fields: [
+        { name: 'targetUserId', value: targetUserId, inline: true },
+        { name: 'action', value: 'BLOCK_USER', inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
     return {
       success: true,
       message: `Usuario bloqueado por ${adminUserId || 'admin'}.`,
@@ -233,6 +267,16 @@ export class AdminUsersService {
         isBlocked: false,
         blockedAt: null,
       },
+    });
+
+    void this.discordLogsService.sendAdminLog({
+      title: 'Usuario desbloqueado',
+      description: 'Conta desbloqueada no painel admin.',
+      fields: [
+        { name: 'targetUserId', value: targetUserId, inline: true },
+        { name: 'action', value: 'UNBLOCK_USER', inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
     });
 
     return {

@@ -1,30 +1,34 @@
-import {
-  Controller,
-  Post,
-  Patch,
-  Delete,
-  Body,
-  Param,
-  UseGuards,
+﻿import {
   BadRequestException,
+  Body,
+  Controller,
+  Delete,
   NotFoundException,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
 } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { RaffleStatus, UserRole } from '@prisma/client';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
-import { Roles } from '../common/decorators/roles.decorator';
-import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { UserRole, RaffleStatus } from '@prisma/client';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
 @Controller('admin/raffles')
 export class AdminController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discordLogsService: DiscordLogsService,
+  ) {}
 
   @Post()
-  async createRaffle(@Body() data: any) {
-    return this.prisma.raffle.create({
+  async createRaffle(@Body() data: any, @CurrentUser() adminUser: any) {
+    const raffle = await this.prisma.raffle.create({
       data: {
         title: data.title,
         description: data.description,
@@ -35,49 +39,122 @@ export class AdminController {
         status: data.status || RaffleStatus.DRAFT,
       },
     });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa criada',
+      description: 'Nova rifa criada no painel admin.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return raffle;
   }
 
   @Patch(':id')
-  async updateRaffle(@Param('id') id: string, @Body() data: any) {
-    return this.prisma.raffle.update({
+  async updateRaffle(
+    @Param('id') id: string,
+    @Body() data: any,
+    @CurrentUser() adminUser: any,
+  ) {
+    const raffle = await this.prisma.raffle.update({
       where: { id },
       data,
     });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa editada',
+      description: 'Rifa atualizada no painel admin.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        {
+          name: 'changedFields',
+          value: Object.keys(data || {}).join(', ') || '-',
+        },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return raffle;
   }
 
   @Patch(':id/publish')
-  async publishRaffle(@Param('id') id: string) {
-    return this.prisma.raffle.update({
+  async publishRaffle(@Param('id') id: string, @CurrentUser() adminUser: any) {
+    const raffle = await this.prisma.raffle.update({
       where: { id },
       data: { status: RaffleStatus.ACTIVE },
     });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa publicada',
+      description: 'Status da rifa alterado para ACTIVE.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return raffle;
   }
 
   @Patch(':id/pause')
-  async pauseRaffle(@Param('id') id: string) {
-    return this.prisma.raffle.update({
+  async pauseRaffle(@Param('id') id: string, @CurrentUser() adminUser: any) {
+    const raffle = await this.prisma.raffle.update({
       where: { id },
       data: { status: RaffleStatus.PAUSED },
     });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa pausada',
+      description: 'Status da rifa alterado para PAUSED.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return raffle;
   }
 
   @Patch(':id/cancel')
-  async cancelRaffle(@Param('id') id: string) {
-    return this.prisma.raffle.update({
+  async cancelRaffle(@Param('id') id: string, @CurrentUser() adminUser: any) {
+    const raffle = await this.prisma.raffle.update({
       where: { id },
       data: { status: RaffleStatus.CANCELLED },
     });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa cancelada',
+      description: 'Status da rifa alterado para CANCELLED.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return raffle;
   }
 
   @Delete(':id')
-  async deleteRaffle(@Param('id') id: string) {
+  async deleteRaffle(@Param('id') id: string, @CurrentUser() adminUser: any) {
     const raffle = await this.prisma.raffle.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, title: true, status: true },
     });
 
     if (!raffle) {
-      throw new NotFoundException('Rifa não encontrada.');
+      throw new NotFoundException('Rifa nao encontrada.');
     }
 
     await this.prisma.$transaction([
@@ -88,6 +165,17 @@ export class AdminController {
         where: { id },
       }),
     ]);
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa excluida',
+      description: 'Rifa removida com exclusao em cascata dos pedidos vinculados.',
+      fields: [
+        { name: 'raffleId', value: raffle.id, inline: true },
+        { name: 'title', value: raffle.title, inline: true },
+        { name: 'status', value: raffle.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
 
     return { success: true, message: 'Rifa removida com sucesso.' };
   }
@@ -105,7 +193,7 @@ export class AdminController {
     const { userId, selectedTickets } = body;
 
     if (!userId) {
-      throw new BadRequestException('userId é obrigatório.');
+      throw new BadRequestException('userId e obrigatorio.');
     }
 
     if (!selectedTickets || !Array.isArray(selectedTickets) || selectedTickets.length === 0) {
@@ -136,7 +224,7 @@ export class AdminController {
     });
 
     if (!raffle) {
-      throw new NotFoundException('Rifa não encontrada.');
+      throw new NotFoundException('Rifa nao encontrada.');
     }
 
     const targetUser = await this.prisma.user.findUnique({
@@ -145,14 +233,14 @@ export class AdminController {
     });
 
     if (!targetUser) {
-      throw new NotFoundException('Usuário alvo não encontrado.');
+      throw new NotFoundException('Usuario alvo nao encontrado.');
     }
 
     const occupiedTickets = raffle.orders.flatMap((o) => o.selectedTickets);
     const conflict = selectedTickets.some((ticket) => occupiedTickets.includes(ticket));
 
     if (conflict) {
-      throw new BadRequestException('Uma ou mais cotas já estão reservadas ou vendidas.');
+      throw new BadRequestException('Uma ou mais cotas ja estao reservadas ou vendidas.');
     }
 
     const totalAmount = selectedTickets.length * raffle.pricePerTicket;
@@ -173,6 +261,19 @@ export class AdminController {
       },
     });
 
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Reserva manual criada',
+      description: 'Admin reservou cotas manualmente.',
+      fields: [
+        { name: 'raffleId', value: raffleId, inline: true },
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'userId', value: userId, inline: true },
+        { name: 'qtdCotas', value: selectedTickets.length, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
     return {
       success: true,
       message: `Reserva manual criada para ${targetUser.name}.`,
@@ -189,6 +290,7 @@ export class AdminController {
       userId?: string;
       selectedTickets: number[];
     },
+    @CurrentUser() adminUser: any,
   ) {
     const { userId, selectedTickets } = body;
 
@@ -226,6 +328,17 @@ export class AdminController {
       data: {
         status: 'CANCELLED',
       },
+    });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Reserva manual removida',
+      description: 'Admin liberou cotas reservadas manualmente.',
+      fields: [
+        { name: 'raffleId', value: raffleId, inline: true },
+        { name: 'affectedOrders', value: orderIdsToCancel.length, inline: true },
+        { name: 'qtdCotasSolicitadas', value: selectedTickets.length, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
     });
 
     return {
@@ -297,6 +410,19 @@ export class AdminController {
       });
 
       return createdWinner;
+    });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Vencedor definido',
+      description: 'Sorteio finalizado e vencedor registrado.',
+      fields: [
+        { name: 'raffleId', value: raffleId, inline: true },
+        { name: 'winnerId', value: winner.id, inline: true },
+        { name: 'userId', value: winner.userId, inline: true },
+        { name: 'orderId', value: winner.orderId, inline: true },
+        { name: 'ticketNumber', value: winner.ticketNumber, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
     });
 
     return this.prisma.winner.findUnique({

@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 interface ListOrdersInput {
@@ -29,7 +30,10 @@ export interface OriginPerformanceRow extends OriginGroupRow {
 
 @Injectable()
 export class AdminOrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discordLogsService: DiscordLogsService,
+  ) {}
 
   async listOrders(input: ListOrdersInput) {
     const page = this.normalizePage(input.page);
@@ -404,7 +408,13 @@ export class AdminOrdersService {
   async confirmPaymentManually(orderId: string, adminUserId?: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { id: true, status: true, orderNsu: true },
+      select: {
+        id: true,
+        status: true,
+        orderNsu: true,
+        providerTransactionNsu: true,
+        totalAmount: true,
+      },
     });
 
     if (!order) {
@@ -429,13 +439,30 @@ export class AdminOrdersService {
       where: { id: orderId },
       data: {
         status: OrderStatus.PAID,
-        providerTransactionNsu:
-          (await this.prisma.order.findUnique({
-            where: { id: orderId },
-            select: { providerTransactionNsu: true },
-          }))?.providerTransactionNsu ||
-          `MANUAL-${Date.now()}`,
+        providerTransactionNsu: order.providerTransactionNsu || `MANUAL-${Date.now()}`,
       },
+    });
+
+    void this.discordLogsService.sendPaymentLog({
+      title: 'Pagamento confirmado manualmente',
+      description: 'Pedido confirmado manualmente no painel admin.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'status', value: 'PAID', inline: true },
+        { name: 'total', value: order.totalAmount, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
+    void this.discordLogsService.sendAdminLog({
+      title: 'Admin confirmou pagamento',
+      description: 'Acao sensivel executada no painel admin.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
     });
 
     return {
@@ -445,10 +472,15 @@ export class AdminOrdersService {
     };
   }
 
-  async cancelOrder(orderId: string) {
+  async cancelOrder(orderId: string, adminUserId?: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        orderNsu: true,
+        totalAmount: true,
+      },
     });
 
     if (!order) {
@@ -474,6 +506,28 @@ export class AdminOrdersService {
       data: { status: OrderStatus.CANCELLED },
     });
 
+    void this.discordLogsService.sendPaymentLog({
+      title: 'Pedido cancelado manualmente',
+      description: 'Pedido cancelado no painel admin.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'status', value: 'CANCELLED', inline: true },
+        { name: 'total', value: order.totalAmount, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
+    void this.discordLogsService.sendAdminLog({
+      title: 'Admin cancelou pedido',
+      description: 'Acao sensivel executada no painel admin.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
     return {
       success: true,
       message: 'Pedido cancelado com sucesso.',
@@ -481,7 +535,7 @@ export class AdminOrdersService {
     };
   }
 
-  async reprocessOrderStatus(orderId: string) {
+  async reprocessOrderStatus(orderId: string, adminUserId?: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
     });
@@ -491,6 +545,15 @@ export class AdminOrdersService {
     }
 
     if (!order.providerTransactionNsu) {
+      void this.discordLogsService.sendAdminLog({
+        title: 'Reprocessamento sem providerTransactionNsu',
+        description: 'Reprocessamento solicitado para pedido sem identificador externo.',
+        fields: [
+          { name: 'orderId', value: order.id, inline: true },
+          { name: 'orderNsu', value: order.orderNsu, inline: true },
+          { name: 'adminId', value: adminUserId || '-', inline: true },
+        ],
+      });
       return {
         success: true,
         message:
@@ -500,6 +563,16 @@ export class AdminOrdersService {
     }
 
     if (order.provider !== 'ASAAS') {
+      void this.discordLogsService.sendAdminLog({
+        title: 'Reprocessamento indisponivel para provider',
+        description: 'Reprocessamento solicitado para provider sem suporte automatico.',
+        fields: [
+          { name: 'orderId', value: order.id, inline: true },
+          { name: 'orderNsu', value: order.orderNsu, inline: true },
+          { name: 'provider', value: order.provider, inline: true },
+          { name: 'adminId', value: adminUserId || '-', inline: true },
+        ],
+      });
       return {
         success: true,
         message: `Reprocessamento automatico indisponivel para provider ${order.provider}.`,
@@ -518,6 +591,30 @@ export class AdminOrdersService {
         status: mappedStatus,
         receiptUrl: asaasPayment?.invoiceUrl || order.receiptUrl,
       },
+    });
+
+    void this.discordLogsService.sendPaymentLog({
+      title: 'Status de pagamento reprocessado',
+      description: 'Status atualizado a partir de consulta manual no provider.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'provider', value: order.provider, inline: true },
+        { name: 'providerStatus', value: asaasPayment?.status || '-', inline: true },
+        { name: 'mappedStatus', value: mappedStatus, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
+    });
+
+    void this.discordLogsService.sendAdminLog({
+      title: 'Admin reprocessou status de pedido',
+      description: 'Acao sensivel executada no painel admin.',
+      fields: [
+        { name: 'orderId', value: order.id, inline: true },
+        { name: 'orderNsu', value: order.orderNsu, inline: true },
+        { name: 'mappedStatus', value: mappedStatus, inline: true },
+        { name: 'adminId', value: adminUserId || '-', inline: true },
+      ],
     });
 
     return {

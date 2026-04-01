@@ -10,6 +10,7 @@ import {
   WebhookProcessingStatus,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 
 interface ListWebhookEventsInput {
   provider?: string;
@@ -30,7 +31,10 @@ interface ProcessAsaasWebhookInput {
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discordLogsService: DiscordLogsService,
+  ) {}
 
   async handleAsaasWebhook(payload: any, webhookToken?: string) {
     const webhookEvent = await this.prisma.webhookEvent.create({
@@ -41,6 +45,16 @@ export class WebhooksService {
         orderNsu: this.normalizeValue(payload?.payment?.externalReference),
         processingStatus: WebhookProcessingStatus.RECEIVED,
       },
+    });
+
+    void this.discordLogsService.sendWebhookLog({
+      title: 'Webhook de pagamento recebido',
+      description: 'Evento recebido no endpoint de webhook do Asaas.',
+      fields: [
+        { name: 'webhookEventId', value: webhookEvent.id, inline: true },
+        { name: 'eventType', value: webhookEvent.eventType || '-', inline: true },
+        { name: 'orderNsu', value: webhookEvent.orderNsu || '-', inline: true },
+      ],
     });
 
     return this.processAsaasWebhook({
@@ -160,14 +174,32 @@ export class WebhooksService {
             input.webhookEventId,
             'invalid_webhook_token',
           );
+          void this.discordLogsService.sendWebhookLog({
+            title: 'Webhook invalido',
+            description: 'Token de webhook invalido recebido.',
+            fields: [
+              { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+              { name: 'motivo', value: 'invalid_webhook_token', inline: true },
+            ],
+          });
           return { received: false, unauthorized: true };
         }
       }
 
-      this.logger.log(`[ASAAS WEBHOOK] Payload recebido: ${JSON.stringify(payload)}`);
+      this.logger.log(
+        `[ASAAS WEBHOOK] Evento recebido eventType=${eventType || 'UNKNOWN'} orderNsu=${orderNsu || '-'} paymentId=${this.normalizeValue(payment?.id) || '-'} paymentStatus=${this.normalizeValue(payment?.status) || '-'}`,
+      );
 
       if (!payment) {
         await this.markWebhookAsIgnored(input.webhookEventId, 'payment_missing');
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook ignorado',
+          description: 'Payload sem bloco de pagamento.',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'motivo', value: 'payment_missing', inline: true },
+          ],
+        });
         return { received: true, ignored: true, reason: 'payment_missing' };
       }
 
@@ -176,6 +208,14 @@ export class WebhooksService {
           input.webhookEventId,
           'external_reference_missing',
         );
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook ignorado',
+          description: 'Webhook sem externalReference (orderNsu).',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'motivo', value: 'external_reference_missing', inline: true },
+          ],
+        });
         return {
           received: true,
           ignored: true,
@@ -190,6 +230,15 @@ export class WebhooksService {
       if (!order) {
         this.logger.warn(`[ASAAS WEBHOOK] Pedido nao encontrado: ${orderNsu}`);
         await this.markWebhookAsIgnored(input.webhookEventId, 'order_not_found');
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook ignorado',
+          description: 'Pedido nao encontrado para externalReference.',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'motivo', value: 'order_not_found', inline: true },
+          ],
+        });
         return { received: true, ignored: true, reason: 'order_not_found' };
       }
 
@@ -221,6 +270,24 @@ export class WebhooksService {
         }
 
         await this.markWebhookAsProcessed(input.webhookEventId);
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook processado',
+          description: 'Evento de pagamento confirmado processado com sucesso.',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'PAID', inline: true },
+          ],
+        });
+        void this.discordLogsService.sendPaymentLog({
+          title: 'Pagamento confirmado',
+          description: 'Pagamento confirmado via webhook do provedor.',
+          fields: [
+            { name: 'orderId', value: order.id, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'PAID', inline: true },
+          ],
+        });
         return {
           received: true,
           processed: true,
@@ -243,6 +310,24 @@ export class WebhooksService {
 
         this.logger.log(`[ASAAS WEBHOOK] Pedido ${orderNsu} atualizado para EXPIRED.`);
         await this.markWebhookAsProcessed(input.webhookEventId);
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook processado',
+          description: 'Pagamento expirado processado com sucesso.',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'EXPIRED', inline: true },
+          ],
+        });
+        void this.discordLogsService.sendPaymentLog({
+          title: 'Pagamento expirado',
+          description: 'Pedido marcado como expirado via webhook.',
+          fields: [
+            { name: 'orderId', value: order.id, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'EXPIRED', inline: true },
+          ],
+        });
         return { received: true, processed: true, status: 'EXPIRED' };
       }
 
@@ -266,6 +351,24 @@ export class WebhooksService {
           `[ASAAS WEBHOOK] Pedido ${orderNsu} atualizado para CANCELLED.`,
         );
         await this.markWebhookAsProcessed(input.webhookEventId);
+        void this.discordLogsService.sendWebhookLog({
+          title: 'Webhook processado',
+          description: 'Evento de cancelamento/refund processado.',
+          fields: [
+            { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'CANCELLED', inline: true },
+          ],
+        });
+        void this.discordLogsService.sendPaymentLog({
+          title: 'Pagamento cancelado',
+          description: 'Pedido cancelado via webhook do provedor.',
+          fields: [
+            { name: 'orderId', value: order.id, inline: true },
+            { name: 'orderNsu', value: orderNsu, inline: true },
+            { name: 'status', value: 'CANCELLED', inline: true },
+          ],
+        });
         return { received: true, processed: true, status: 'CANCELLED' };
       }
 
@@ -273,6 +376,15 @@ export class WebhooksService {
         `[ASAAS WEBHOOK] Evento ${eventType || 'UNKNOWN'} recebido para ${orderNsu}, sem alteracao de status.`,
       );
       await this.markWebhookAsIgnored(input.webhookEventId, 'event_without_status_mapping');
+      void this.discordLogsService.sendWebhookLog({
+        title: 'Webhook ignorado',
+        description: 'Evento recebido sem mapeamento de status para acao.',
+        fields: [
+          { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+          { name: 'orderNsu', value: orderNsu, inline: true },
+          { name: 'eventType', value: eventType || 'UNKNOWN', inline: true },
+        ],
+      });
       return { received: true, processed: false, ignoredEvent: eventType };
     } catch (error: any) {
       const errorMessage = this.normalizeValue(error?.message) || 'unknown_error';
@@ -283,6 +395,14 @@ export class WebhooksService {
       );
 
       await this.markWebhookAsFailed(input.webhookEventId, errorMessage);
+      void this.discordLogsService.sendWebhookLog({
+        title: 'Erro ao processar webhook',
+        description: 'Falha durante o processamento de webhook do provedor.',
+        fields: [
+          { name: 'webhookEventId', value: input.webhookEventId, inline: true },
+          { name: 'erro', value: errorMessage, inline: true },
+        ],
+      });
       return { received: true, processed: false, error: true };
     }
   }

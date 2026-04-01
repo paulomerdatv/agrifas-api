@@ -1,4 +1,4 @@
-import {
+﻿import {
   Controller,
   Delete,
   Get,
@@ -59,13 +59,19 @@ export class AdminOrdersController {
   }
 
   @Patch(':id/cancel')
-  async cancelOrder(@Param('id') id: string) {
-    return this.adminOrdersService.cancelOrder(id);
+  async cancelOrder(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.adminOrdersService.cancelOrder(id, user?.userId);
   }
 
   @Patch(':id/reprocess')
-  async reprocessOrderStatus(@Param('id') id: string) {
-    return this.adminOrdersService.reprocessOrderStatus(id);
+  async reprocessOrderStatus(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.adminOrdersService.reprocessOrderStatus(id, user?.userId);
   }
 
   @Delete(':id/customer-data')

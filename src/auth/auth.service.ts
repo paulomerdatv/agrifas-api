@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { RegisterDto, LoginDto } from './dto/auth.dto';
+import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 
 interface SteamOpenIdProfileInput {
   steamid?: string;
@@ -28,6 +29,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly discordLogsService: DiscordLogsService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -36,6 +38,11 @@ export class AuthService {
     });
 
     if (existingUser) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de cadastro',
+        description: 'Tentativa de cadastro com e-mail ja utilizado.',
+        fields: [{ name: 'email', value: this.maskEmail(dto.email) }],
+      });
       throw new ConflictException('Este e-mail ja esta em uso.');
     }
 
@@ -54,6 +61,17 @@ export class AuthService {
       },
     });
 
+    void this.discordLogsService.sendAuthLog({
+      title: 'Novo cadastro',
+      description: 'Conta criada com sucesso.',
+      fields: [
+        { name: 'userId', value: user.id, inline: true },
+        { name: 'provider', value: user.provider || 'LOCAL', inline: true },
+        { name: 'ref', value: user.refCode || '-', inline: true },
+        { name: 'utm_source', value: user.utmSource || '-', inline: true },
+      ],
+    });
+
     return this.generateToken(user);
   }
 
@@ -63,14 +81,35 @@ export class AuthService {
     });
 
     if (!user) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de login',
+        description: 'Usuario nao encontrado para o e-mail informado.',
+        fields: [{ name: 'email', value: this.maskEmail(dto.email) }],
+      });
       throw new UnauthorizedException('Credenciais invalidas.');
     }
 
     if (user.isBlocked) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de login',
+        description: 'Conta bloqueada tentou autenticar.',
+        fields: [
+          { name: 'userId', value: user.id, inline: true },
+          { name: 'email', value: this.maskEmail(user.email), inline: true },
+        ],
+      });
       throw new UnauthorizedException('Conta bloqueada. Entre em contato com o suporte.');
     }
 
     if (!user.passwordHash) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de login',
+        description: 'Conta social tentou login por senha.',
+        fields: [
+          { name: 'userId', value: user.id, inline: true },
+          { name: 'provider', value: user.provider || '-', inline: true },
+        ],
+      });
       throw new UnauthorizedException(
         'Esta conta usa login social. Utilize o login com Steam.',
       );
@@ -78,7 +117,35 @@ export class AuthService {
 
     const valid = await bcrypt.compare(dto.password, user.passwordHash);
     if (!valid) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de login',
+        description: 'Senha invalida informada.',
+        fields: [
+          { name: 'userId', value: user.id, inline: true },
+          { name: 'email', value: this.maskEmail(user.email), inline: true },
+        ],
+      });
       throw new UnauthorizedException('Credenciais invalidas.');
+    }
+
+    void this.discordLogsService.sendAuthLog({
+      title: 'Login realizado',
+      description: 'Autenticacao por e-mail/senha concluida com sucesso.',
+      fields: [
+        { name: 'userId', value: user.id, inline: true },
+        { name: 'provider', value: user.provider || 'LOCAL', inline: true },
+      ],
+    });
+
+    if (user.role === 'ADMIN') {
+      void this.discordLogsService.sendAdminLog({
+        title: 'Admin logou',
+        description: 'Login de administrador realizado com sucesso.',
+        fields: [
+          { name: 'adminId', value: user.id, inline: true },
+          { name: 'provider', value: user.provider || 'LOCAL', inline: true },
+        ],
+      });
     }
 
     return this.generateToken(user);
@@ -87,6 +154,10 @@ export class AuthService {
   async loginWithSteamProfile(profileInput: SteamOpenIdProfileInput) {
     const steamId = String(profileInput?.steamid || '').trim();
     if (!steamId) {
+      void this.discordLogsService.sendAuthLog({
+        title: 'Falha de login Steam',
+        description: 'Retorno Steam sem steamId valido.',
+      });
       throw new UnauthorizedException('SteamID invalido no retorno da Steam.');
     }
 
@@ -111,6 +182,14 @@ export class AuthService {
 
       if (existingUserBySteamEmail && !existingUserBySteamEmail.steamId) {
         if (existingUserBySteamEmail.isBlocked) {
+          void this.discordLogsService.sendAuthLog({
+            title: 'Falha de login Steam',
+            description: 'Conta bloqueada tentou autenticar via Steam.',
+            fields: [
+              { name: 'userId', value: existingUserBySteamEmail.id, inline: true },
+              { name: 'steamId', value: this.maskSteamId(steamId), inline: true },
+            ],
+          });
           throw new UnauthorizedException(
             'Conta bloqueada. Entre em contato com o suporte.',
           );
@@ -142,6 +221,14 @@ export class AuthService {
       }
     } else {
       if (user.isBlocked) {
+        void this.discordLogsService.sendAuthLog({
+          title: 'Falha de login Steam',
+          description: 'Conta bloqueada tentou autenticar via Steam.',
+          fields: [
+            { name: 'userId', value: user.id, inline: true },
+            { name: 'steamId', value: this.maskSteamId(steamId), inline: true },
+          ],
+        });
         throw new UnauthorizedException(
           'Conta bloqueada. Entre em contato com o suporte.',
         );
@@ -154,6 +241,28 @@ export class AuthService {
           steamAvatar: steamAvatar || user.steamAvatar,
           provider: 'STEAM',
         },
+      });
+    }
+
+    void this.discordLogsService.sendAuthLog({
+      title: 'Login Steam realizado',
+      description: 'Autenticacao via Steam concluida com sucesso.',
+      fields: [
+        { name: 'userId', value: user.id, inline: true },
+        { name: 'steamId', value: this.maskSteamId(steamId), inline: true },
+        { name: 'provider', value: 'STEAM', inline: true },
+      ],
+    });
+
+    if (user.role === 'ADMIN') {
+      void this.discordLogsService.sendAdminLog({
+        title: 'Admin logou via Steam',
+        description: 'Login de administrador via Steam concluido com sucesso.',
+        fields: [
+          { name: 'adminId', value: user.id, inline: true },
+          { name: 'steamId', value: this.maskSteamId(steamId), inline: true },
+          { name: 'provider', value: 'STEAM', inline: true },
+        ],
       });
     }
 
@@ -213,5 +322,21 @@ export class AuthService {
     const value = String(raw).trim();
     if (!value) return null;
     return value.slice(0, 120);
+  }
+
+  private maskEmail(email?: string | null) {
+    if (!email) return '-';
+    const normalized = email.trim().toLowerCase();
+    const [local, domain] = normalized.split('@');
+    if (!local || !domain) return normalized;
+    const visible = local.slice(0, 2);
+    return `${visible}***@${domain}`;
+  }
+
+  private maskSteamId(steamId?: string | null) {
+    if (!steamId) return '-';
+    const normalized = steamId.trim();
+    if (normalized.length <= 8) return normalized;
+    return `${normalized.slice(0, 4)}...${normalized.slice(-4)}`;
   }
 }
