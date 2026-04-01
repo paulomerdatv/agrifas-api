@@ -57,6 +57,13 @@ enum SecurityCodePurpose {
   TWO_FACTOR_EMAIL
 }
 
+enum WinnerDeliveryStatus {
+  PENDING
+  IN_PROGRESS
+  DELIVERED
+  CANCELLED
+}
+
 model User {
   id           String    @id @default(uuid())
   name         String
@@ -202,6 +209,9 @@ model Winner {
   ticketNumber   Int
   drawnAt        DateTime @default(now())
   drawnByAdminId String?
+  deliveryStatus WinnerDeliveryStatus @default(PENDING)
+  deliveryNotes  String?
+  deliveredAt    DateTime?
 }
 
 model WebhookEvent {

@@ -166,6 +166,7 @@ export class AdminOperationsController {
             id: true,
             orderNsu: true,
             selectedTickets: true,
+            totalAmount: true,
           },
         },
       },
@@ -173,3 +174,4 @@ export class AdminOperationsController {
     });
   }
 }
+

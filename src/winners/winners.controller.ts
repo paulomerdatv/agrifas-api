@@ -28,6 +28,7 @@ export class WinnersController {
             id: true,
             orderNsu: true,
             selectedTickets: true,
+            totalAmount: true,
           },
         },
       },
@@ -36,3 +37,4 @@ export class WinnersController {
     });
   }
 }
+
