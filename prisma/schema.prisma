@@ -126,6 +126,7 @@ model Raffle {
   orders Order[]
   winner Winner?
   featuredInHomeConfigs HomeConfig[] @relation("HomeConfigFeaturedRaffle")
+  featuredInCampaigns Campaign[] @relation("CampaignFeaturedRaffle")
 }
 
 model HomeConfig {
@@ -147,6 +148,33 @@ model HomeConfig {
 
   featuredRaffle Raffle? @relation("HomeConfigFeaturedRaffle", fields: [featuredRaffleId], references: [id], onDelete: SetNull)
 
+  @@index([featuredRaffleId])
+}
+
+model Campaign {
+  id               String   @id @default(uuid())
+  title            String
+  slug             String   @unique
+  description      String?
+  active           Boolean  @default(false)
+  startsAt         DateTime?
+  endsAt           DateTime?
+  bannerTitle      String?
+  bannerSubtitle   String?
+  bannerButtonText String?
+  bannerButtonLink String?
+  couponCode       String?
+  featuredRaffleId String?
+  priority         Int      @default(0)
+  campaignType     String?
+  imageUrl         String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  featuredRaffle Raffle? @relation("CampaignFeaturedRaffle", fields: [featuredRaffleId], references: [id], onDelete: SetNull)
+
+  @@index([active, priority, createdAt])
+  @@index([startsAt, endsAt])
   @@index([featuredRaffleId])
 }
 

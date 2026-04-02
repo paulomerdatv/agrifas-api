@@ -1,6 +1,7 @@
 ﻿import { Module } from '@nestjs/common';
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
+import { CampaignsModule } from './campaigns/campaigns.module';
 import { DiscordLogsModule } from './discord-logs/discord-logs.module';
 import { HomeConfigModule } from './home-config/home-config.module';
 import { OrdersModule } from './orders/orders.module';
@@ -19,6 +20,7 @@ import { WinnersModule } from './winners/winners.module';
     SecurityModule,
     AuthModule,
     HomeConfigModule,
+    CampaignsModule,
     UsersModule,
     RafflesModule,
     AdminModule,

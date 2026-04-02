@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AdminAnalyticsController } from './admin-analytics.controller';
 import { AdminCouponsController } from './admin-coupons.controller';
 import { AdminCouponsService } from './admin-coupons.service';
 import { AdminController } from './admin.controller';
@@ -10,6 +11,7 @@ import { AdminUsersService } from './admin-users.service';
 
 @Module({
   controllers: [
+    AdminAnalyticsController,
     AdminController,
     AdminCouponsController,
     AdminOperationsController,

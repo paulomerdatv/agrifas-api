@@ -125,7 +125,8 @@ export class AdminOrdersService {
   }
 
   async getDashboardMetrics() {
-    const todayStart = new Date();
+    const now = new Date();
+    const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
 
     const tomorrowStart = new Date(todayStart);
@@ -134,17 +135,23 @@ export class AdminOrdersService {
     const sevenDaysAgo = new Date(todayStart);
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
 
-    const revenueSeriesStart = new Date(todayStart);
-    revenueSeriesStart.setDate(revenueSeriesStart.getDate() - 13);
+    const thirtyDaysAgo = new Date(todayStart);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 29);
+
+    const revenueSeriesStart = new Date(thirtyDaysAgo);
 
     const [
       paidAgg,
       revenueTodayAgg,
+      revenueLast7Agg,
+      revenueLast30Agg,
       paidOrdersToday,
       pendingOrders,
+      expiredOrders,
       activeRaffles,
       endedRaffles,
       newUsersLast7Days,
+      totalUsers,
       paidOrdersCount,
       totalOrdersCount,
       pendingStatusCount,
@@ -153,11 +160,10 @@ export class AdminOrdersService {
       cancelledStatusCount,
       expiredStatusCount,
       waitingPaymentCount,
-      paidOrdersForTopRaffles,
+      paidOrdersForAnalysis,
       paidOrdersForSeries,
       userOriginsGrouped,
       orderOriginsGrouped,
-      paidRevenueByOriginGrouped,
     ] = await this.prisma.$transaction([
       this.prisma.order.aggregate({
         where: { status: OrderStatus.PAID },
@@ -168,6 +174,26 @@ export class AdminOrdersService {
           status: OrderStatus.PAID,
           updatedAt: {
             gte: todayStart,
+            lt: tomorrowStart,
+          },
+        },
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          status: OrderStatus.PAID,
+          updatedAt: {
+            gte: sevenDaysAgo,
+            lt: tomorrowStart,
+          },
+        },
+        _sum: { totalAmount: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          status: OrderStatus.PAID,
+          updatedAt: {
+            gte: thirtyDaysAgo,
             lt: tomorrowStart,
           },
         },
@@ -185,11 +211,29 @@ export class AdminOrdersService {
       this.prisma.order.count({
         where: { status: OrderStatus.PENDING },
       }),
-      this.prisma.raffle.count({
-        where: { status: 'ACTIVE' },
+      this.prisma.order.count({
+        where: { status: OrderStatus.EXPIRED },
       }),
       this.prisma.raffle.count({
-        where: { status: 'ENDED' },
+        where: {
+          status: 'ACTIVE',
+          AND: [
+            {
+              OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+            },
+            {
+              OR: [{ endAt: null }, { endAt: { gt: now } }],
+            },
+          ],
+        },
+      }),
+      this.prisma.raffle.count({
+        where: {
+          OR: [
+            { status: 'ENDED' },
+            { status: 'ACTIVE', endAt: { lte: now } },
+          ],
+        },
       }),
       this.prisma.user.count({
         where: {
@@ -199,6 +243,7 @@ export class AdminOrdersService {
           },
         },
       }),
+      this.prisma.user.count(),
       this.prisma.order.count({
         where: { status: OrderStatus.PAID },
       }),
@@ -220,7 +265,13 @@ export class AdminOrdersService {
         },
         select: {
           raffleId: true,
+          userId: true,
           totalAmount: true,
+          couponCode: true,
+          refCode: true,
+          utmSource: true,
+          utmMedium: true,
+          utmCampaign: true,
         },
       }),
       this.prisma.order.findMany({
@@ -252,20 +303,12 @@ export class AdminOrdersService {
           utmCampaign: true,
         },
       }),
-      this.prisma.order.findMany({
-        where: { status: OrderStatus.PAID },
-        select: {
-          refCode: true,
-          utmSource: true,
-          utmMedium: true,
-          utmCampaign: true,
-          totalAmount: true,
-        },
-      }),
     ]);
 
     const totalRevenue = paidAgg._sum.totalAmount || 0;
     const revenueToday = revenueTodayAgg._sum.totalAmount || 0;
+    const revenueLast7Days = revenueLast7Agg._sum.totalAmount || 0;
+    const revenueLast30Days = revenueLast30Agg._sum.totalAmount || 0;
     const averageTicket =
       paidOrdersCount > 0 ? Number((totalRevenue / paidOrdersCount).toFixed(2)) : 0;
     const conversionRate =
@@ -288,7 +331,7 @@ export class AdminOrdersService {
     ];
 
     const revenueByDayMap = new Map<string, number>();
-    for (let i = 0; i < 14; i += 1) {
+    for (let i = 0; i < 30; i += 1) {
       const date = new Date(revenueSeriesStart);
       date.setDate(revenueSeriesStart.getDate() + i);
       revenueByDayMap.set(this.toDateKey(date), 0);
@@ -307,24 +350,81 @@ export class AdminOrdersService {
       }),
     );
 
-    const revenueByRaffle = new Map<string, number>();
-    for (const order of paidOrdersForTopRaffles) {
-      const current = revenueByRaffle.get(order.raffleId) || 0;
-      revenueByRaffle.set(
-        order.raffleId,
-        Number((current + order.totalAmount).toFixed(2)),
+    const raffleAggregates = new Map<
+      string,
+      { revenue: number; orders: number; participants: Set<string> }
+    >();
+    const couponAggregates = new Map<
+      string,
+      { code: string; orders: number; revenue: number }
+    >();
+
+    for (const order of paidOrdersForAnalysis) {
+      const currentRaffle = raffleAggregates.get(order.raffleId) || {
+        revenue: 0,
+        orders: 0,
+        participants: new Set<string>(),
+      };
+
+      currentRaffle.revenue = Number(
+        (currentRaffle.revenue + Number(order.totalAmount || 0)).toFixed(2),
       );
+      currentRaffle.orders += 1;
+      currentRaffle.participants.add(order.userId);
+      raffleAggregates.set(order.raffleId, currentRaffle);
+
+      const normalizedCoupon = String(order.couponCode || '')
+        .trim()
+        .toUpperCase();
+      if (normalizedCoupon) {
+        const currentCoupon = couponAggregates.get(normalizedCoupon) || {
+          code: normalizedCoupon,
+          orders: 0,
+          revenue: 0,
+        };
+        currentCoupon.orders += 1;
+        currentCoupon.revenue = Number(
+          (currentCoupon.revenue + Number(order.totalAmount || 0)).toFixed(2),
+        );
+        couponAggregates.set(normalizedCoupon, currentCoupon);
+      }
     }
 
-    const topRafflesRaw = Array.from(revenueByRaffle.entries())
-      .map(([raffleId, revenue]) => ({
+    const byRevenueRaw = Array.from(raffleAggregates.entries())
+      .map(([raffleId, values]) => ({
         raffleId,
-        revenue,
+        revenue: values.revenue,
+        orders: values.orders,
+        participants: values.participants.size,
       }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 7);
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        if (b.orders !== a.orders) return b.orders - a.orders;
+        return b.participants - a.participants;
+      })
+      .slice(0, 5);
 
-    const topRaffleIds = topRafflesRaw.map((item) => item.raffleId);
+    const byOrdersRaw = Array.from(raffleAggregates.entries())
+      .map(([raffleId, values]) => ({
+        raffleId,
+        revenue: values.revenue,
+        orders: values.orders,
+        participants: values.participants.size,
+      }))
+      .sort((a, b) => {
+        if (b.orders !== a.orders) return b.orders - a.orders;
+        if (b.participants !== a.participants) return b.participants - a.participants;
+        return b.revenue - a.revenue;
+      })
+      .slice(0, 5);
+
+    const topRaffleIds = Array.from(
+      new Set([
+        ...byRevenueRaw.map((item) => item.raffleId),
+        ...byOrdersRaw.map((item) => item.raffleId),
+      ]),
+    );
+
     const topRafflesData = topRaffleIds.length
       ? await this.prisma.raffle.findMany({
           where: { id: { in: topRaffleIds } },
@@ -333,10 +433,41 @@ export class AdminOrdersService {
       : [];
 
     const raffleTitleById = new Map(topRafflesData.map((item) => [item.id, item.title]));
-    const topRafflesByRevenue = topRafflesRaw.map((item) => ({
+
+    const topRafflesByRevenue = byRevenueRaw.map((item) => ({
       raffleId: item.raffleId,
       title: raffleTitleById.get(item.raffleId) || `Rifa ${item.raffleId}`,
       revenue: item.revenue || 0,
+      orders: item.orders || 0,
+      participants: item.participants || 0,
+    }));
+
+    const topRafflesByOrders = byOrdersRaw.map((item) => ({
+      raffleId: item.raffleId,
+      title: raffleTitleById.get(item.raffleId) || `Rifa ${item.raffleId}`,
+      orders: item.orders || 0,
+      participants: item.participants || 0,
+      revenue: item.revenue || 0,
+    }));
+
+    const topCoupons = Array.from(couponAggregates.values())
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        return b.orders - a.orders;
+      })
+      .slice(0, 5)
+      .map((item) => ({
+        code: item.code,
+        orders: item.orders,
+        revenue: item.revenue,
+      }));
+
+    const paidRevenueByOriginGrouped = paidOrdersForAnalysis.map((order) => ({
+      refCode: order.refCode,
+      utmSource: order.utmSource,
+      utmMedium: order.utmMedium,
+      utmCampaign: order.utmCampaign,
+      totalAmount: order.totalAmount,
     }));
 
     const originPerformance = this.buildOriginPerformance({
@@ -345,22 +476,55 @@ export class AdminOrdersService {
       paidRevenueByOriginGrouped,
     });
 
+    const topOrigins = originPerformance.slice(0, 5);
+
     return {
       totalRevenue,
       revenueToday,
+      revenueLast7Days,
+      revenueLast30Days,
       paidOrdersToday,
       pendingOrders,
+      expiredOrders,
       activeRaffles,
       endedRaffles,
       averageTicket,
       newUsersLast7Days,
+      totalUsers,
       conversionRate,
       totalOrders: totalOrdersCount,
       paidOrders: paidOrdersCount,
       revenueByDay,
       ordersByStatus,
       topRafflesByRevenue,
+      topRafflesByOrders,
+      topCoupons,
       originPerformance,
+      topOrigins,
+    };
+  }
+
+  async getAnalyticsOverview() {
+    return this.getDashboardMetrics();
+  }
+
+  async getAnalyticsRevenueSeries(daysRaw?: number) {
+    const metrics = await this.getDashboardMetrics();
+    const normalizedDays = Number.isFinite(daysRaw)
+      ? Math.min(90, Math.max(1, Math.floor(daysRaw as number)))
+      : 30;
+
+    return {
+      days: normalizedDays,
+      series: metrics.revenueByDay.slice(-normalizedDays),
+    };
+  }
+
+  async getAnalyticsTopRaffles() {
+    const metrics = await this.getDashboardMetrics();
+    return {
+      byRevenue: metrics.topRafflesByRevenue,
+      byOrders: metrics.topRafflesByOrders,
     };
   }
 
