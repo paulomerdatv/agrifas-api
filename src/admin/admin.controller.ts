@@ -1,8 +1,9 @@
-﻿import {
+import {
   BadRequestException,
   Body,
   Controller,
   Delete,
+  Get,
   NotFoundException,
   Param,
   Patch,
@@ -16,6 +17,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { deriveAdminRaffleTimelineStatus } from '../raffles/raffle-schedule.utils';
 
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN)
@@ -26,18 +28,32 @@ export class AdminController {
     private readonly discordLogsService: DiscordLogsService,
   ) {}
 
+  @Get()
+  async listRafflesForAdmin() {
+    const now = new Date();
+    const raffles = await this.prisma.raffle.findMany({
+      include: {
+        orders: {
+          select: {
+            selectedTickets: true,
+            status: true,
+            provider: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return raffles.map((raffle) => this.formatAdminRaffle(raffle, now));
+  }
+
   @Post()
   async createRaffle(@Body() data: any, @CurrentUser() adminUser: any) {
+    const createData = this.buildCreateData(data);
+
     const raffle = await this.prisma.raffle.create({
-      data: {
-        title: data.title,
-        description: data.description,
-        image: data.image,
-        pricePerTicket: data.pricePerTicket,
-        totalTickets: data.totalTickets,
-        estimatedValue: data.estimatedValue,
-        status: data.status || RaffleStatus.DRAFT,
-      },
+      data: createData,
     });
 
     void this.discordLogsService.sendRaffleLog({
@@ -47,11 +63,51 @@ export class AdminController {
         { name: 'raffleId', value: raffle.id, inline: true },
         { name: 'title', value: raffle.title, inline: true },
         { name: 'status', value: raffle.status, inline: true },
+        { name: 'publishAt', value: raffle.publishAt?.toISOString() || '-', inline: true },
+        { name: 'endAt', value: raffle.endAt?.toISOString() || '-', inline: true },
         { name: 'adminId', value: adminUser?.userId || '-', inline: true },
       ],
     });
 
     return raffle;
+  }
+
+  @Post(':id/duplicate')
+  async duplicateRaffle(@Param('id') id: string, @CurrentUser() adminUser: any) {
+    const sourceRaffle = await this.prisma.raffle.findUnique({
+      where: { id },
+    });
+
+    if (!sourceRaffle) {
+      throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    const duplicated = await this.prisma.raffle.create({
+      data: {
+        title: `[COPIA] ${sourceRaffle.title}`,
+        description: sourceRaffle.description,
+        image: sourceRaffle.image,
+        pricePerTicket: sourceRaffle.pricePerTicket,
+        totalTickets: sourceRaffle.totalTickets,
+        estimatedValue: sourceRaffle.estimatedValue,
+        status: RaffleStatus.DRAFT,
+        publishAt: null,
+        endAt: null,
+      },
+    });
+
+    void this.discordLogsService.sendRaffleLog({
+      title: 'Rifa duplicada',
+      description: 'Admin duplicou uma rifa existente.',
+      fields: [
+        { name: 'sourceRaffleId', value: sourceRaffle.id, inline: true },
+        { name: 'newRaffleId', value: duplicated.id, inline: true },
+        { name: 'newStatus', value: duplicated.status, inline: true },
+        { name: 'adminId', value: adminUser?.userId || '-', inline: true },
+      ],
+    });
+
+    return duplicated;
   }
 
   @Patch(':id')
@@ -60,9 +116,33 @@ export class AdminController {
     @Body() data: any,
     @CurrentUser() adminUser: any,
   ) {
+    const currentRaffle = await this.prisma.raffle.findUnique({
+      where: { id },
+      select: { id: true, publishAt: true, endAt: true },
+    });
+
+    if (!currentRaffle) {
+      throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    const updateData = this.buildUpdateData(data);
+
+    if (!Object.keys(updateData).length) {
+      throw new BadRequestException('Nenhum campo valido foi informado para atualizacao.');
+    }
+
+    const effectivePublishAt =
+      updateData.publishAt !== undefined
+        ? updateData.publishAt
+        : currentRaffle.publishAt;
+    const effectiveEndAt =
+      updateData.endAt !== undefined ? updateData.endAt : currentRaffle.endAt;
+
+    this.validateScheduleWindow(effectivePublishAt, effectiveEndAt);
+
     const raffle = await this.prisma.raffle.update({
       where: { id },
-      data,
+      data: updateData,
     });
 
     void this.discordLogsService.sendRaffleLog({
@@ -74,7 +154,7 @@ export class AdminController {
         { name: 'status', value: raffle.status, inline: true },
         {
           name: 'changedFields',
-          value: Object.keys(data || {}).join(', ') || '-',
+          value: Object.keys(updateData).join(', ') || '-',
         },
         { name: 'adminId', value: adminUser?.userId || '-', inline: true },
       ],
@@ -451,5 +531,184 @@ export class AdminController {
         },
       },
     });
+  }
+
+  private parseDateOrNull(value: unknown, fieldName: string) {
+    if (value === undefined) return undefined;
+    if (value === null || String(value).trim() === '') return null;
+
+    const date = new Date(String(value));
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException(`${fieldName} invalido.`);
+    }
+
+    return date;
+  }
+
+  private parseStatus(value: unknown) {
+    if (value === undefined) return undefined;
+
+    const normalized = String(value || '').trim().toUpperCase();
+    if (!normalized) {
+      throw new BadRequestException('status invalido.');
+    }
+
+    if (!Object.values(RaffleStatus).includes(normalized as RaffleStatus)) {
+      throw new BadRequestException('status invalido.');
+    }
+
+    return normalized as RaffleStatus;
+  }
+
+  private validateScheduleWindow(publishAt?: Date | null, endAt?: Date | null) {
+    if (!publishAt || !endAt) {
+      return;
+    }
+
+    if (endAt.getTime() <= publishAt.getTime()) {
+      throw new BadRequestException('endAt deve ser maior que publishAt.');
+    }
+  }
+
+  private buildCreateData(input: any) {
+    const publishAt = this.parseDateOrNull(input?.publishAt, 'publishAt');
+    const endAt = this.parseDateOrNull(input?.endAt, 'endAt');
+    this.validateScheduleWindow(publishAt ?? null, endAt ?? null);
+
+    const title = String(input?.title || '').trim();
+    const description = String(input?.description || '').trim();
+    const image = String(input?.image || '').trim();
+    const pricePerTicket = Number(input?.pricePerTicket);
+    const totalTickets = Number(input?.totalTickets);
+    const estimatedValue = Number(input?.estimatedValue);
+
+    if (!title || !description || !image) {
+      throw new BadRequestException('title, description e image sao obrigatorios.');
+    }
+
+    if (!Number.isFinite(pricePerTicket) || pricePerTicket <= 0) {
+      throw new BadRequestException('pricePerTicket invalido.');
+    }
+
+    if (!Number.isInteger(totalTickets) || totalTickets <= 0) {
+      throw new BadRequestException('totalTickets invalido.');
+    }
+
+    if (!Number.isFinite(estimatedValue) || estimatedValue <= 0) {
+      throw new BadRequestException('estimatedValue invalido.');
+    }
+
+    return {
+      title,
+      description,
+      image,
+      pricePerTicket,
+      totalTickets,
+      estimatedValue,
+      status: this.parseStatus(input?.status) || RaffleStatus.DRAFT,
+      publishAt: publishAt ?? null,
+      endAt: endAt ?? null,
+    };
+  }
+
+  private buildUpdateData(input: any) {
+    const output: Record<string, any> = {};
+
+    if (Object.prototype.hasOwnProperty.call(input, 'title')) {
+      const title = String(input.title || '').trim();
+      if (!title) {
+        throw new BadRequestException('title invalido.');
+      }
+      output.title = title;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'description')) {
+      const description = String(input.description || '').trim();
+      if (!description) {
+        throw new BadRequestException('description invalido.');
+      }
+      output.description = description;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'image')) {
+      const image = String(input.image || '').trim();
+      if (!image) {
+        throw new BadRequestException('image invalido.');
+      }
+      output.image = image;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'pricePerTicket')) {
+      const pricePerTicket = Number(input.pricePerTicket);
+      if (!Number.isFinite(pricePerTicket) || pricePerTicket <= 0) {
+        throw new BadRequestException('pricePerTicket invalido.');
+      }
+      output.pricePerTicket = pricePerTicket;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'totalTickets')) {
+      const totalTickets = Number(input.totalTickets);
+      if (!Number.isInteger(totalTickets) || totalTickets <= 0) {
+        throw new BadRequestException('totalTickets invalido.');
+      }
+      output.totalTickets = totalTickets;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'estimatedValue')) {
+      const estimatedValue = Number(input.estimatedValue);
+      if (!Number.isFinite(estimatedValue) || estimatedValue <= 0) {
+        throw new BadRequestException('estimatedValue invalido.');
+      }
+      output.estimatedValue = estimatedValue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(input, 'status')) {
+      output.status = this.parseStatus(input.status);
+    }
+
+    const publishAt = this.parseDateOrNull(input?.publishAt, 'publishAt');
+    const endAt = this.parseDateOrNull(input?.endAt, 'endAt');
+
+    if (publishAt !== undefined) {
+      output.publishAt = publishAt;
+    }
+
+    if (endAt !== undefined) {
+      output.endAt = endAt;
+    }
+
+    return output;
+  }
+
+  private formatAdminRaffle(raffle: any, now: Date) {
+    const paidOrders = raffle.orders?.filter((order: any) => order.status === 'PAID') || [];
+
+    const reservedOrders =
+      raffle.orders?.filter((order: any) => {
+        if (order.status !== 'PENDING') return false;
+
+        if (order.provider === 'ADMIN_RESERVE') return true;
+
+        const createdAt = new Date(order.createdAt).getTime();
+        const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+        return createdAt >= tenMinutesAgo;
+      }) || [];
+
+    const soldCount = paidOrders.reduce(
+      (acc: number, order: any) => acc + (order.selectedTickets?.length || 0),
+      0,
+    );
+
+    const reservedCount = reservedOrders.reduce(
+      (acc: number, order: any) => acc + (order.selectedTickets?.length || 0),
+      0,
+    );
+
+    return {
+      ...raffle,
+      soldCount,
+      reservedCount,
+      derivedStatus: deriveAdminRaffleTimelineStatus(raffle, now),
+    };
   }
 }

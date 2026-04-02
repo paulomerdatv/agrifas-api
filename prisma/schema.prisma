@@ -81,6 +81,8 @@ model User {
   utmCampaign  String?
   isBlocked    Boolean   @default(false)
   blockedAt    DateTime?
+  blockedReason String?
+  blockedByAdminId String?
   role         UserRole  @default(USER)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -89,6 +91,7 @@ model User {
   supportTickets SupportTicket[]
   winners        Winner[]
   securityCodes  UserSecurityCode[]
+  securityEvents SecurityEvent[]
 }
 
 model UserSecurityCode {
@@ -115,11 +118,36 @@ model Raffle {
   soldTickets    Int          @default(0)
   estimatedValue Float
   status         RaffleStatus @default(DRAFT)
+  publishAt      DateTime?
+  endAt          DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   orders Order[]
   winner Winner?
+  featuredInHomeConfigs HomeConfig[] @relation("HomeConfigFeaturedRaffle")
+}
+
+model HomeConfig {
+  id                  String   @id @default("default")
+  heroTitle           String
+  heroSubtitle        String
+  heroButtonText      String
+  heroButtonLink      String
+  topNoticeText       String?
+  promoTitle          String
+  promoSubtitle       String
+  promoButtonText     String
+  promoButtonLink     String
+  featuredRaffleId    String?
+  heroBackgroundImage String?
+  promoImage          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  featuredRaffle Raffle? @relation("HomeConfigFeaturedRaffle", fields: [featuredRaffleId], references: [id], onDelete: SetNull)
+
+  @@index([featuredRaffleId])
 }
 
 model Order {
@@ -229,4 +257,19 @@ model WebhookEvent {
 
   @@index([provider, processingStatus, createdAt])
   @@index([orderNsu])
+}
+
+model SecurityEvent {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  ipAddress String?
+  route     String?
+  eventType String
+  severity  String   @default("WARNING")
+  context   Json?
+  createdAt DateTime @default(now())
+
+  @@index([eventType, createdAt])
+  @@index([userId, createdAt])
 }

@@ -7,7 +7,9 @@ import {
 } from '@nestjs/common';
 import { CouponType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { SecurityMonitorService } from '../common/security/security-monitor.service';
 import { DiscordLogsService } from '../discord-logs/discord-logs.service';
+import { getRaffleUnavailableReason } from '../raffles/raffle-schedule.utils';
 
 interface CouponPreviewResult {
   coupon: {
@@ -39,16 +41,52 @@ interface TrackingOriginData {
   utmCampaign: string | null;
 }
 
+interface CheckoutRequestContext {
+  ipAddress?: string | null;
+  route?: string | null;
+}
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+  private readonly antiFraudConfig = {
+    maxTicketsPerOrder: this.readPositiveIntEnv(
+      'ANTI_FRAUD_MAX_TICKETS_PER_ORDER',
+      120,
+    ),
+    maxTicketsPerUserPerRaffle: this.readPositiveIntEnv(
+      'ANTI_FRAUD_MAX_TICKETS_PER_USER_PER_RAFFLE',
+      300,
+    ),
+    orderCooldownSeconds: this.readPositiveIntEnv(
+      'ANTI_FRAUD_ORDER_COOLDOWN_SECONDS',
+      10,
+    ),
+    maxPendingOrdersPerUser: this.readPositiveIntEnv(
+      'ANTI_FRAUD_MAX_PENDING_ORDERS_PER_USER',
+      5,
+    ),
+    maxPendingOrdersPerRaffleUser: this.readPositiveIntEnv(
+      'ANTI_FRAUD_MAX_PENDING_ORDERS_PER_RAFFLE_USER',
+      2,
+    ),
+    maxPendingTicketsPerRaffleUser: this.readPositiveIntEnv(
+      'ANTI_FRAUD_MAX_PENDING_TICKETS_PER_RAFFLE_USER',
+      80,
+    ),
+  };
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly discordLogsService: DiscordLogsService,
+    private readonly securityMonitorService: SecurityMonitorService,
   ) {}
 
-  async createAsaasCheckout(jwtUser: any, dto: any) {
+  async createAsaasCheckout(
+    jwtUser: any,
+    dto: any,
+    requestContext: CheckoutRequestContext = {},
+  ) {
     const { raffleId, selectedTickets, customerData, couponCode, origin } = dto;
 
     let order: any = null;
@@ -71,8 +109,159 @@ export class PaymentsService {
       });
       if (!raffle) throw new NotFoundException('Rifa nao encontrada.');
 
-      if (!selectedTickets || selectedTickets.length === 0) {
+      const raffleUnavailableReason = getRaffleUnavailableReason(raffle, new Date());
+      if (raffleUnavailableReason) {
+        await this.logSuspiciousCheckoutAttempt(
+          'RAFFLE_OUTSIDE_SCHEDULE_WINDOW',
+          user.id,
+          requestContext,
+          {
+            raffleId: raffle.id,
+            raffleStatus: raffle.status,
+            publishAt: raffle.publishAt,
+            endAt: raffle.endAt,
+          },
+        );
+        throw new BadRequestException(raffleUnavailableReason);
+      }
+
+      if (!Array.isArray(selectedTickets) || selectedTickets.length === 0) {
+        await this.logSuspiciousCheckoutAttempt(
+          'EMPTY_TICKET_SELECTION',
+          jwtUser?.userId,
+          requestContext,
+          { raffleId },
+        );
         throw new BadRequestException('Nenhum numero selecionado.');
+      }
+
+      const normalizedTickets = selectedTickets
+        .map((ticket: any) => Number(ticket))
+        .filter((ticket: number) => Number.isInteger(ticket));
+      const uniqueTickets = Array.from(new Set(normalizedTickets));
+
+      if (normalizedTickets.length !== selectedTickets.length) {
+        await this.logSuspiciousCheckoutAttempt(
+          'INVALID_TICKET_FORMAT',
+          user.id,
+          requestContext,
+          { raffleId, selectedTicketsLength: selectedTickets.length },
+        );
+        throw new BadRequestException(
+          'As cotas informadas sao invalidas. Atualize a pagina e tente novamente.',
+        );
+      }
+
+      if (uniqueTickets.length !== normalizedTickets.length) {
+        await this.logSuspiciousCheckoutAttempt(
+          'DUPLICATE_TICKET_SELECTION',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            selectedTicketsLength: selectedTickets.length,
+            uniqueTicketsLength: uniqueTickets.length,
+          },
+        );
+        throw new BadRequestException(
+          'Voce enviou cotas repetidas. Selecione cotas diferentes para continuar.',
+        );
+      }
+
+      if (uniqueTickets.length > this.antiFraudConfig.maxTicketsPerOrder) {
+        await this.logSuspiciousCheckoutAttempt(
+          'MAX_TICKETS_PER_ORDER_EXCEEDED',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            selectedTicketsLength: uniqueTickets.length,
+            maxTicketsPerOrder: this.antiFraudConfig.maxTicketsPerOrder,
+          },
+        );
+        throw new BadRequestException(
+          `Limite por pedido excedido. Maximo permitido: ${this.antiFraudConfig.maxTicketsPerOrder} cotas.`,
+        );
+      }
+
+      const hasOutOfRangeTicket = uniqueTickets.some(
+        (ticket) => ticket < 1 || ticket > raffle.totalTickets,
+      );
+      if (hasOutOfRangeTicket) {
+        await this.logSuspiciousCheckoutAttempt(
+          'TICKET_OUT_OF_RANGE',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            totalTickets: raffle.totalTickets,
+          },
+        );
+        throw new BadRequestException(
+          'Existem cotas fora do intervalo da rifa. Atualize a pagina e tente novamente.',
+        );
+      }
+
+      const cooldownThreshold = new Date(
+        Date.now() - this.antiFraudConfig.orderCooldownSeconds * 1000,
+      );
+      const lastUserOrder = await this.prisma.order.findFirst({
+        where: {
+          userId: user.id,
+          createdAt: { gte: cooldownThreshold },
+        },
+        select: {
+          id: true,
+          createdAt: true,
+          orderNsu: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (lastUserOrder) {
+        const elapsedMs = Date.now() - new Date(lastUserOrder.createdAt).getTime();
+        const retryAfterSeconds = Math.max(
+          1,
+          this.antiFraudConfig.orderCooldownSeconds -
+            Math.floor(elapsedMs / 1000),
+        );
+
+        await this.logSuspiciousCheckoutAttempt(
+          'ORDER_CREATION_COOLDOWN',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            retryAfterSeconds,
+            orderNsu: lastUserOrder.orderNsu,
+          },
+        );
+
+        throw new BadRequestException(
+          `Aguarde ${retryAfterSeconds}s antes de criar outro pedido.`,
+        );
+      }
+
+      const pendingOrdersCount = await this.prisma.order.count({
+        where: {
+          userId: user.id,
+          status: 'PENDING',
+        },
+      });
+
+      if (pendingOrdersCount >= this.antiFraudConfig.maxPendingOrdersPerUser) {
+        await this.logSuspiciousCheckoutAttempt(
+          'MAX_PENDING_ORDERS_PER_USER_EXCEEDED',
+          user.id,
+          requestContext,
+          {
+            pendingOrdersCount,
+            maxPendingOrdersPerUser: this.antiFraudConfig.maxPendingOrdersPerUser,
+          },
+        );
+        throw new BadRequestException(
+          'Voce possui muitos pedidos pendentes. Finalize ou aguarde expirar para criar novos.',
+        );
       }
 
       const existingOrders = await this.prisma.order.findMany({
@@ -82,12 +271,99 @@ export class PaymentsService {
         },
       });
 
+      const userOrdersOnRaffle = existingOrders.filter(
+        (order) => order.userId === user.id,
+      );
+      const userCommittedTicketsInRaffle = userOrdersOnRaffle.reduce(
+        (acc, current) => acc + (current.selectedTickets?.length || 0),
+        0,
+      );
+
+      if (
+        userCommittedTicketsInRaffle + uniqueTickets.length >
+        this.antiFraudConfig.maxTicketsPerUserPerRaffle
+      ) {
+        await this.logSuspiciousCheckoutAttempt(
+          'MAX_TICKETS_PER_USER_RAFFLE_EXCEEDED',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            currentCommittedTickets: userCommittedTicketsInRaffle,
+            selectedTicketsLength: uniqueTickets.length,
+            maxTicketsPerUserPerRaffle:
+              this.antiFraudConfig.maxTicketsPerUserPerRaffle,
+          },
+        );
+        throw new BadRequestException(
+          `Limite de cotas por usuario nesta rifa: ${this.antiFraudConfig.maxTicketsPerUserPerRaffle}.`,
+        );
+      }
+
+      const userPendingOrdersOnRaffle = userOrdersOnRaffle.filter(
+        (order) => order.status === 'PENDING',
+      );
+      const userPendingTicketsOnRaffle = userPendingOrdersOnRaffle.reduce(
+        (acc, current) => acc + (current.selectedTickets?.length || 0),
+        0,
+      );
+
+      if (
+        userPendingOrdersOnRaffle.length >=
+        this.antiFraudConfig.maxPendingOrdersPerRaffleUser
+      ) {
+        await this.logSuspiciousCheckoutAttempt(
+          'MAX_PENDING_ORDERS_PER_RAFFLE_USER_EXCEEDED',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            pendingOrdersOnRaffle: userPendingOrdersOnRaffle.length,
+            maxPendingOrdersPerRaffleUser:
+              this.antiFraudConfig.maxPendingOrdersPerRaffleUser,
+          },
+        );
+        throw new BadRequestException(
+          'Voce atingiu o limite de reservas pendentes nesta rifa.',
+        );
+      }
+
+      if (
+        userPendingTicketsOnRaffle + uniqueTickets.length >
+        this.antiFraudConfig.maxPendingTicketsPerRaffleUser
+      ) {
+        await this.logSuspiciousCheckoutAttempt(
+          'MAX_PENDING_TICKETS_PER_RAFFLE_USER_EXCEEDED',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            pendingTicketsOnRaffle: userPendingTicketsOnRaffle,
+            selectedTicketsLength: uniqueTickets.length,
+            maxPendingTicketsPerRaffleUser:
+              this.antiFraudConfig.maxPendingTicketsPerRaffleUser,
+          },
+        );
+        throw new BadRequestException(
+          'Voce possui cotas pendentes demais nesta rifa. Finalize os pedidos atuais para continuar.',
+        );
+      }
+
       const occupiedTickets = existingOrders.flatMap((o) => o.selectedTickets);
-      const hasConflict = selectedTickets.some((t) =>
+      const hasConflict = uniqueTickets.some((t) =>
         occupiedTickets.includes(t),
       );
 
       if (hasConflict) {
+        await this.logSuspiciousCheckoutAttempt(
+          'TICKET_CONFLICT_ON_CHECKOUT',
+          user.id,
+          requestContext,
+          {
+            raffleId,
+            selectedTicketsLength: uniqueTickets.length,
+          },
+        );
         throw new BadRequestException(
           'Algumas cotas selecionadas ja foram reservadas ou vendidas.',
         );
@@ -102,7 +378,7 @@ export class PaymentsService {
         '65929587000163';
 
       const subtotalAmount = Number(
-        (selectedTickets.length * raffle.pricePerTicket).toFixed(2),
+        (uniqueTickets.length * raffle.pricePerTicket).toFixed(2),
       );
       const orderNsu = `AG-${Date.now()}-${Math.random()
         .toString(36)
@@ -152,7 +428,7 @@ export class PaymentsService {
           data: {
             userId: user.id,
             raffleId,
-            selectedTickets,
+            selectedTickets: uniqueTickets,
             totalAmount,
             subtotalAmount,
             couponDiscountAmount: discountAmount,
@@ -474,11 +750,19 @@ export class PaymentsService {
         id: true,
         title: true,
         pricePerTicket: true,
+        status: true,
+        publishAt: true,
+        endAt: true,
       },
     });
 
     if (!raffle) {
       throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    const raffleUnavailableReason = getRaffleUnavailableReason(raffle, new Date());
+    if (raffleUnavailableReason) {
+      throw new BadRequestException(raffleUnavailableReason);
     }
 
     const subtotalAmount = Number(
@@ -687,5 +971,29 @@ export class PaymentsService {
         }),
       ])
       .catch(() => null);
+  }
+
+  private readPositiveIntEnv(envKey: string, fallback: number) {
+    const raw = Number(process.env[envKey]);
+    if (!Number.isFinite(raw) || raw <= 0) {
+      return fallback;
+    }
+    return Math.floor(raw);
+  }
+
+  private async logSuspiciousCheckoutAttempt(
+    eventType: string,
+    userId: string | null | undefined,
+    requestContext: CheckoutRequestContext,
+    context?: Record<string, any>,
+  ) {
+    await this.securityMonitorService.logSuspiciousAttempt({
+      eventType,
+      severity: 'WARNING',
+      userId: userId || null,
+      ipAddress: requestContext?.ipAddress || null,
+      route: requestContext?.route || 'POST /payments/create-checkout',
+      context: context || null,
+    });
   }
 }

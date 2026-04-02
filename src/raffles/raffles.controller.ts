@@ -1,5 +1,9 @@
-import { Controller, Get, Param, NotFoundException } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  getRaffleUnavailableReason,
+  isRaffleActiveInScheduleWindow,
+} from './raffle-schedule.utils';
 
 @Controller('raffles')
 export class RafflesController {
@@ -21,7 +25,9 @@ export class RafflesController {
       }) || [];
 
     const soldNumbers: number[] = paidOrders.flatMap((o: any) => o.selectedTickets);
-    const reservedNumbers: number[] = reservedOrders.flatMap((o: any) => o.selectedTickets);
+    const reservedNumbers: number[] = reservedOrders.flatMap(
+      (o: any) => o.selectedTickets,
+    );
 
     const tickets = Array.from({ length: raffle.totalTickets }, (_, i) => {
       const number = i + 1;
@@ -47,9 +53,19 @@ export class RafflesController {
 
   @Get()
   async findAll() {
+    const now = new Date();
+
     const raffles = await this.prisma.raffle.findMany({
       where: {
-        status: { in: ['ACTIVE'] },
+        status: 'ACTIVE',
+        AND: [
+          {
+            OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+          },
+          {
+            OR: [{ endAt: null }, { endAt: { gt: now } }],
+          },
+        ],
       },
       include: {
         orders: {
@@ -84,7 +100,13 @@ export class RafflesController {
     });
 
     if (!raffle) {
-      throw new NotFoundException('Rifa não encontrada.');
+      throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    const now = new Date();
+    if (!isRaffleActiveInScheduleWindow(raffle, now)) {
+      const reason = getRaffleUnavailableReason(raffle, now);
+      throw new NotFoundException(reason || 'Rifa indisponivel no momento.');
     }
 
     return this.formatRaffleWithTickets(raffle);

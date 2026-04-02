@@ -2,10 +2,12 @@
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
 import { DiscordLogsModule } from './discord-logs/discord-logs.module';
+import { HomeConfigModule } from './home-config/home-config.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RafflesModule } from './raffles/raffles.module';
+import { SecurityModule } from './common/security/security.module';
 import { SupportModule } from './support/support.module';
 import { UsersModule } from './users/users.module';
 import { WinnersModule } from './winners/winners.module';
@@ -14,7 +16,9 @@ import { WinnersModule } from './winners/winners.module';
   imports: [
     PrismaModule,
     DiscordLogsModule,
+    SecurityModule,
     AuthModule,
+    HomeConfigModule,
     UsersModule,
     RafflesModule,
     AdminModule,

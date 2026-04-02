@@ -1,4 +1,5 @@
-﻿import {
+import {
+  Body,
   Controller,
   Get,
   Param,
@@ -57,8 +58,9 @@ export class AdminUsersController {
   async blockUser(
     @Param('id') id: string,
     @CurrentUser() user: any,
+    @Body() body?: { reason?: string },
   ) {
-    return this.adminUsersService.blockUser(id, user?.userId);
+    return this.adminUsersService.blockUser(id, user?.userId, body?.reason);
   }
 
   @Patch(':id/unblock')
@@ -69,3 +71,4 @@ export class AdminUsersController {
     return this.adminUsersService.unblockUser(id, user?.userId);
   }
 }
+

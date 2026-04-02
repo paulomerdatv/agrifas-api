@@ -1,15 +1,20 @@
-﻿import {
+import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   NotFoundException,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { RateLimit } from '../common/decorators/rate-limit.decorator';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { RateLimitGuard } from '../common/guards/rate-limit.guard';
 import { DiscordLogsService } from '../discord-logs/discord-logs.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { getRaffleUnavailableReason } from '../raffles/raffle-schedule.utils';
 
 @UseGuards(JwtAuthGuard)
 @Controller('orders')
@@ -20,6 +25,12 @@ export class OrdersController {
   ) {}
 
   @Post()
+  @UseGuards(RateLimitGuard)
+  @RateLimit({
+    limit: Number(process.env.ANTI_FRAUD_RATE_LIMIT_ORDERS_CREATE_PER_MINUTE || 8),
+    windowMs: 60_000,
+    keyPrefix: 'orders:create',
+  })
   async createOrder(
     @Body()
     body: {
@@ -33,6 +44,7 @@ export class OrdersController {
       };
     },
     @CurrentUser() user: any,
+    @Req() req: any,
   ) {
     const { raffleId, selectedTickets } = body;
 
@@ -42,6 +54,15 @@ export class OrdersController {
 
     if (!raffle) {
       throw new NotFoundException('Rifa nao encontrada.');
+    }
+
+    const raffleUnavailableReason = getRaffleUnavailableReason(raffle, new Date());
+    if (raffleUnavailableReason) {
+      throw new BadRequestException(raffleUnavailableReason);
+    }
+
+    if (!selectedTickets || !Array.isArray(selectedTickets) || !selectedTickets.length) {
+      throw new BadRequestException('Selecione ao menos uma cota.');
     }
 
     const totalAmount = selectedTickets.length * raffle.pricePerTicket;
@@ -76,6 +97,7 @@ export class OrdersController {
         { name: 'orderNsu', value: order.orderNsu, inline: true },
         { name: 'userId', value: user.userId, inline: true },
         { name: 'raffleId', value: raffleId, inline: true },
+        { name: 'ip', value: this.extractIpAddress(req) || '-', inline: true },
         { name: 'total', value: totalAmount, inline: true },
       ],
     });
@@ -120,4 +142,23 @@ export class OrdersController {
     if (!value) return null;
     return value.slice(0, 120);
   }
+
+  private extractIpAddress(request: any) {
+    const forwardedFor = request?.headers?.['x-forwarded-for'];
+    if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+      return forwardedFor.split(',')[0].trim();
+    }
+
+    if (Array.isArray(forwardedFor) && forwardedFor.length) {
+      return String(forwardedFor[0]).trim();
+    }
+
+    return (
+      request?.ip ||
+      request?.socket?.remoteAddress ||
+      request?.connection?.remoteAddress ||
+      null
+    );
+  }
 }
+

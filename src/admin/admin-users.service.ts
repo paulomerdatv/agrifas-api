@@ -38,6 +38,8 @@ export class AdminUsersService {
           role: true,
           isBlocked: true,
           blockedAt: true,
+          blockedReason: true,
+          blockedByAdminId: true,
           createdAt: true,
           updatedAt: true,
           orders: {
@@ -81,6 +83,8 @@ export class AdminUsersService {
         role: true,
         isBlocked: true,
         blockedAt: true,
+        blockedReason: true,
+        blockedByAdminId: true,
         createdAt: true,
         updatedAt: true,
         orders: {
@@ -129,6 +133,8 @@ export class AdminUsersService {
       rafflesParticipated: Array.from(rafflesParticipatedMap.values()),
       provider: user.provider,
       steamAvatar: user.steamAvatar,
+      blockedReason: user.blockedReason || null,
+      blockedByAdminId: user.blockedByAdminId || null,
     };
   }
 
@@ -210,7 +216,11 @@ export class AdminUsersService {
     };
   }
 
-  async blockUser(targetUserId: string, adminUserId?: string) {
+  async blockUser(
+    targetUserId: string,
+    adminUserId?: string,
+    reasonInput?: string,
+  ) {
     const user = await this.requireUser(targetUserId);
 
     if (targetUserId === adminUserId) {
@@ -225,11 +235,17 @@ export class AdminUsersService {
       };
     }
 
+    const blockReason =
+      String(reasonInput || '').trim().slice(0, 240) ||
+      'Bloqueio manual efetuado no painel admin.';
+
     await this.prisma.user.update({
       where: { id: targetUserId },
       data: {
         isBlocked: true,
         blockedAt: new Date(),
+        blockedReason: blockReason,
+        blockedByAdminId: adminUserId || null,
       },
     });
 
@@ -240,6 +256,7 @@ export class AdminUsersService {
         { name: 'targetUserId', value: targetUserId, inline: true },
         { name: 'action', value: 'BLOCK_USER', inline: true },
         { name: 'adminId', value: adminUserId || '-', inline: true },
+        { name: 'reason', value: blockReason, inline: false },
       ],
     });
 
@@ -266,6 +283,8 @@ export class AdminUsersService {
       data: {
         isBlocked: false,
         blockedAt: null,
+        blockedReason: null,
+        blockedByAdminId: null,
       },
     });
 
@@ -365,6 +384,8 @@ export class AdminUsersService {
       role: user.role,
       isBlocked: user.isBlocked,
       blockedAt: user.blockedAt,
+      blockedReason: user.blockedReason || null,
+      blockedByAdminId: user.blockedByAdminId || null,
       createdAt: user.createdAt,
       totalSpent,
       ordersCount,
